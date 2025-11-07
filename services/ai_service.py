@@ -1,9 +1,16 @@
 """AI service for generating YAML configs using OpenAI"""
 
 import yaml
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from openai import OpenAI
 from config import get_settings
+from utils.config_validator import (
+    ConfigValidator,
+    ValidationError,
+    ValidationWarning,
+    UnsupportedModelError,
+    FutureModelError,
+)
 
 
 class AIService:
@@ -42,6 +49,21 @@ class AIService:
         prompt_parts.append("YAML:")
         full_prompt = "\n".join(prompt_parts)
         
+        validator = ConfigValidator()
+
+        unsupported_reference = validator.find_unsupported_model_reference(prompt)
+        if unsupported_reference:
+            alias, canonical = unsupported_reference
+            if validator.is_registered_model(canonical):
+                supported = ", ".join(validator.supported_model_names())
+                raise ValueError(
+                    f'Refrakt does not currently support "{alias}" (requested model: {canonical}). '
+                    f"Supported models: {supported}"
+                )
+            raise ValueError(
+                f'Refrakt will support "{alias}" soon!'
+            )
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -65,12 +87,45 @@ class AIService:
             yaml_text = self._clean_yaml_text(yaml_text)
             
             # Parse and validate YAML
-            config = yaml.safe_load(yaml_text)
+            raw_config = yaml.safe_load(yaml_text)
             
-            if config is None:
+            if raw_config is None:
                 raise ValueError("Generated YAML is empty")
-            
-            return config
+
+            try:
+                result = validator.validate(raw_config)
+            except ValidationError as validation_error:
+                model_name = self._extract_model_name(raw_config)
+                if isinstance(validation_error, UnsupportedModelError):
+                    supported = ", ".join(validator.supported_model_names())
+                    raise ValueError(
+                        f'Refrakt does not currently support "{model_name or "unknown"}". '
+                        f"Supported models: {supported}"
+                    ) from validation_error
+                if isinstance(validation_error, FutureModelError):
+                    raise ValueError(str(validation_error)) from validation_error
+
+                if model_name:
+                    print(
+                        "DEBUG: Validation failed for generated config; attempting fallback template "
+                        f"(model={model_name}). Reason: {validation_error}"
+                    )
+                    try:
+                        result = validator.fallback_to_template(model_name, overrides=raw_config)
+                    except ValidationError as fallback_error:
+                        raise ValueError(str(fallback_error)) from fallback_error
+                    result.warnings.append(
+                        ValidationWarning(
+                            f"Applied fallback template due to validation error: {validation_error}"
+                        )
+                    )
+                else:
+                    raise ValueError(str(validation_error)) from validation_error
+
+            for warning in result.warnings:
+                print(f"DEBUG: Config validation warning: {warning.message}")
+
+            return result.config
             
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML generated: {str(e)}")
@@ -94,7 +149,7 @@ class AIService:
         
         return yaml_text.strip()
     
-    def test_connection(self) -> Dict[str, any]:
+    def test_connection(self) -> Dict[str, Any]:
         """Test OpenAI API connection"""
         try:
             response = self.client.chat.completions.create(
@@ -115,4 +170,15 @@ class AIService:
                 "error": str(e),
                 "api_key_configured": False
             }
+
+    @staticmethod
+    def _extract_model_name(config: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(config, dict):
+            return None
+        model_section = config.get("model")
+        if isinstance(model_section, dict):
+            name = model_section.get("name")
+            if isinstance(name, str):
+                return name
+        return None
 
