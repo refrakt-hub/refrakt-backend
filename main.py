@@ -52,14 +52,14 @@ if __name__ == "__main__":
         elif env == "prod":
             port = 8002
             reload = False
-            print(f"🚀 Starting Refrakt Backend in PRODUCTION mode on port {port}")
+            print(f"Starting Refrakt Backend in PRODUCTION mode on port {port}")
         else:
             port = 8000
             reload = False
     else:
         port = 8000
         reload = False
-        print(f"💡 Usage: python main.py [dev|prod]")
+        print(f"Usage: python main.py [dev|prod]")
     
     if reload:
         uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

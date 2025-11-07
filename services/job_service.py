@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shutil
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta
@@ -218,6 +219,30 @@ class JobService:
         """List all jobs"""
         return list(self.jobs.values())
     
+    def cleanup_job_directory(self, job_id: str, job_dir: Path) -> bool:
+        """
+        Clean up local job directory after successful R2 upload
+        
+        Args:
+            job_id: Job identifier
+            job_dir: Job directory path to clean up
+            
+        Returns:
+            True if cleanup was successful, False otherwise
+        """
+        try:
+            if not job_dir.exists():
+                print(f"Job directory already cleaned up: {job_dir}")
+                return True
+            
+            # Delete the entire job directory
+            shutil.rmtree(job_dir)
+            print(f"Cleaned up local files for job {job_id}")
+            return True
+        except Exception as e:
+            print(f"Error cleaning up job directory {job_dir}: {str(e)}")
+            return False
+    
     async def run_job(
         self,
         job_id: str,
@@ -339,7 +364,7 @@ class JobService:
                 self.update_job_status(job_id, "uploading")
                 await self.websocket_service.broadcast_log(
                     job_id,
-                    "📦 Uploading artifacts to R2..."
+                    "Uploading artifacts to R2..."
                 )
                 
                 # Upload artifacts to R2
@@ -351,12 +376,56 @@ class JobService:
                 self.jobs[job_id]["r2_uploaded"] = upload_stats["uploaded"] > 0
                 self.jobs[job_id]["r2_stats"] = upload_stats
                 
+                # Store artifact metadata before cleanup (for listing after cleanup)
+                artifact_metadata = []
+                if output_dir.exists():
+                    for file_path in output_dir.rglob('*'):
+                        if file_path.is_file():
+                            try:
+                                stat = file_path.stat()
+                                relative_path = str(file_path.relative_to(output_dir))
+                                artifact_metadata.append({
+                                    "name": file_path.name,
+                                    "path": relative_path,
+                                    "size": stat.st_size,
+                                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                                })
+                            except Exception as e:
+                                print(f"Error collecting artifact metadata for {file_path}: {str(e)}")
+                
+                self.jobs[job_id]["artifact_metadata"] = artifact_metadata
+                
+                # Clean up local files if upload was successful
+                # Only cleanup if all files were uploaded successfully (no failures)
+                if upload_stats["uploaded"] > 0 and upload_stats["failed"] == 0:
+                    await self.websocket_service.broadcast_log(
+                        job_id,
+                        "Cleaning up local files..."
+                    )
+                    cleanup_success = self.cleanup_job_directory(job_id, output_dir)
+                    if cleanup_success:
+                        await self.websocket_service.broadcast_log(
+                            job_id,
+                            "Local files cleaned up successfully"
+                        )
+                        self.jobs[job_id]["local_cleaned"] = True
+                    else:
+                        await self.websocket_service.broadcast_log(
+                            job_id,
+                            "Warning: Failed to clean up local files"
+                        )
+                elif upload_stats["failed"] > 0:
+                    await self.websocket_service.broadcast_log(
+                        job_id,
+                        f"Keeping local files due to {upload_stats['failed']} upload failure(s)"
+                    )
+                
                 self.update_job_status(job_id, "completed")
                 self.jobs[job_id]["result_path"] = str(output_dir)
                 
                 await self.websocket_service.broadcast_log(
                     job_id,
-                    "✅ Job completed and artifacts uploaded!"
+                    "Job completed and artifacts uploaded!"
                 )
                 print(f"DEBUG: Job {job_id} completed successfully")
             else:

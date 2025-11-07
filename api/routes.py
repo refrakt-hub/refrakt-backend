@@ -259,8 +259,40 @@ async def list_job_artifacts(job_id: str):
     job_dir = settings.JOBS_DIR / job_id
     artifacts = []
     r2_uploaded = job.get("r2_uploaded", False)
+    local_cleaned = job.get("local_cleaned", False)
     
-    if job_dir.exists():
+    # If local files were cleaned up, use stored metadata
+    if local_cleaned and "artifact_metadata" in job:
+        artifact_metadata = job["artifact_metadata"]
+        for meta in artifact_metadata:
+            # Generate URLs if R2 is configured
+            download_url = None
+            public_url = None
+            
+            if r2_uploaded and r2_service.is_configured():
+                download_url = r2_service.generate_presigned_url(
+                    job_id,
+                    meta["path"],
+                    expiration=3600
+                )
+                public_url = f"{settings.R2_PUBLIC_URL}/jobs/{job_id}/{meta['path']}"
+            
+            # Classify artifact type from path
+            artifact_path = Path(meta["path"])
+            artifact_type = classify_artifact(artifact_path)
+            
+            artifact = JobArtifact(
+                name=meta["name"],
+                path=meta["path"],
+                type=artifact_type,
+                size=meta["size"],
+                modified=meta["modified"],
+                download_url=download_url,
+                public_url=public_url
+            )
+            artifacts.append(artifact)
+    elif job_dir.exists():
+        # Local files still exist, read from disk
         for file_path in job_dir.rglob('*'):
             if file_path.is_file():
                 try:
