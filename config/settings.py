@@ -28,18 +28,53 @@ class Settings:
     
     # Application Configuration
     MAX_FILE_SIZE: int = 500 * 1024 * 1024  # 500MB
-    JOBS_DIR: Path = Path("./jobs")
     
     # Prompt Template Path
-    PROMPT_TEMPLATE_PATH: Path = Path("config/prompt.md")
+    PROMPT_TEMPLATE_PATH: Path = Path("./backend/config/PROMPT.md")
+    
+    # Project root directory (parent of backend directory)
+    # When running from project root: python refrakt-backend/main.py dev
+    # We can detect project root by going up from refrakt-backend/config/settings.py
+    # __file__ is refrakt-backend/config/settings.py
+    # .parent is refrakt-backend/config/
+    # .parent.parent is refrakt-backend/
+    # .parent.parent.parent is refrakt/ (project root)
+    # 
+    # Alternative: Use current working directory if we're running from project root
+    # This is more reliable when the script is executed from the project root
+    _settings_file_path = Path(__file__)
+    _backend_dir = _settings_file_path.parent.parent  # refrakt-backend/
+    _calculated_root = _settings_file_path.parent.parent.parent  # refrakt/
+    
+    # Verify: if backend dir name is "refrakt-backend", then parent is project root
+    if _backend_dir.name == "refrakt-backend" and _calculated_root.exists():
+        PROJECT_ROOT: Path = _calculated_root
+    else:
+        # Fallback: use current working directory (assumes running from project root)
+        PROJECT_ROOT: Path = Path.cwd()
+    
+    # JOBS_DIR is at project root: refrakt/jobs/
+    # This will be set in __init__ after PROJECT_ROOT is available
+    JOBS_DIR: Path = None  # type: ignore
     
     def __init__(self):
         """Initialize settings and validate required configurations"""
         if not self.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
+        # Resolve JOBS_DIR relative to project root
+        # jobs/ directory is at project root level
+        self.JOBS_DIR = (self.PROJECT_ROOT / "jobs").resolve()
+        
+        # Debug output
+        print(f"DEBUG: Settings initialized")
+        print(f"DEBUG: PROJECT_ROOT: {self.PROJECT_ROOT}")
+        print(f"DEBUG: PROJECT_ROOT exists: {self.PROJECT_ROOT.exists()}")
+        print(f"DEBUG: JOBS_DIR: {self.JOBS_DIR}")
+        print(f"DEBUG: Current working directory: {Path.cwd()}")
+        
         # Create jobs directory if it doesn't exist
-        self.JOBS_DIR.mkdir(exist_ok=True)
+        self.JOBS_DIR.mkdir(parents=True, exist_ok=True)
     
     @property
     def is_r2_configured(self) -> bool:

@@ -28,6 +28,7 @@ class JobStatus(BaseModel):
     r2_uploaded: Optional[bool] = False
     error: Optional[str] = None
     logs: Optional[List[str]] = None
+    dataset: Optional[dict] = None
 
 
 class JobArtifact(BaseModel):

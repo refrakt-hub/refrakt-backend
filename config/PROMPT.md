@@ -80,6 +80,65 @@ trainer:
     device: cuda/cpu
 ```
 
+### Custom Dataset (Zip Upload)
+
+When the user references an uploaded/custom zip dataset, always emit the following scaffold.
+
+- Force `dataset.name: custom`
+- Set `dataset.params.zip_path: "{{DATASET_PATH}}"` (the backend replaces it with the staged temp path)
+- Default `dataset.params.task_type` to `supervised` unless the user specifies otherwise
+- Always include a `transform` list; if the user does not mention augmentations, supply `Resize → ToTensor → Normalize`
+- If the user asks for specific augmentations, insert them **before** `ToTensor`, then keep `Normalize` (unless the user explicitly opts out)
+- Do not invent filesystem paths
+
+```yaml
+runtime:
+  mode: pipeline
+  log_type: []
+dataset:
+  name: custom
+  params:
+    zip_path: "{{DATASET_PATH}}"
+    task_type: supervised
+  transform:
+    - name: Resize
+      params: { size: [224, 224] }
+    - name: ToTensor
+    - name: Normalize
+      params:
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+dataloader:
+  params:
+    batch_size: 64
+    shuffle: true
+    num_workers: 4
+    drop_last: false
+model:
+  name: <model_name>
+  wrapper: <wrapper_name>
+  params:
+    in_channels: 3
+    num_classes: <int>
+loss:
+  name: ce_wrapped
+  mode: logits
+  params: {}
+optimizer:
+  name: adamw
+  params:
+    lr: 0.0003
+scheduler:
+  name: null
+  params: null
+trainer:
+  name: supervised
+  params:
+    save_dir: "./checkpoints"
+    num_epochs: 10
+    device: "cuda"
+```
+
 ### Pure ML Pipeline
 ```yaml
 runtime:
@@ -380,6 +439,107 @@ trainer:
     save_dir: "./checkpoints"
     num_epochs: 1
     device: cpu
+```
+
+### Custom zip: "Train ResNet18 on my uploaded dataset"
+```yaml
+runtime:
+  mode: pipeline
+  log_type: []
+dataset:
+  name: custom
+  params:
+    zip_path: "{{DATASET_PATH}}"
+    task_type: supervised
+  transform:
+    - name: Resize
+      params: { size: [224, 224] }
+    - name: ToTensor
+    - name: Normalize
+      params:
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+dataloader:
+  params:
+    batch_size: 64
+    shuffle: true
+    num_workers: 4
+    drop_last: false
+model:
+  name: resnet18
+  wrapper: resnet
+  params:
+    in_channels: 3
+    num_classes: 10
+loss:
+  name: ce_wrapped
+  mode: logits
+  params: {}
+optimizer:
+  name: adamw
+  params:
+    lr: 0.0003
+scheduler:
+  name: null
+  params: null
+trainer:
+  name: supervised
+  params:
+    save_dir: "./checkpoints"
+    num_epochs: 10
+    device: "cuda"
+```
+
+### Custom zip with augmentations: "ConvNeXt with random flips and normalization"
+```yaml
+runtime:
+  mode: pipeline
+  log_type: []
+dataset:
+  name: custom
+  params:
+    zip_path: "{{DATASET_PATH}}"
+    task_type: supervised
+  transform:
+    - name: Resize
+      params: { size: [224, 224] }
+    - name: RandomHorizontalFlip
+      params: { p: 0.5 }
+    - name: ToTensor
+    - name: Normalize
+      params:
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+dataloader:
+  params:
+    batch_size: 64
+    shuffle: true
+    num_workers: 4
+    drop_last: false
+model:
+  name: convnext
+  wrapper: convnext
+  params:
+    in_channels: 3
+    num_classes: 5
+loss:
+  name: ce_wrapped
+  mode: logits
+  params: {}
+optimizer:
+  name: adamw
+  params:
+    lr: 0.0003
+scheduler:
+  name: cosine
+  params:
+    T_max: 10
+trainer:
+  name: supervised
+  params:
+    save_dir: "./checkpoints"
+    num_epochs: 10
+    device: "cuda"
 ```
 
 ## Instructions

@@ -7,9 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from models import (
-    JobRequest,
     JobResponse,
     JobStatus,
     JobArtifact,
@@ -70,17 +78,59 @@ async def test_r2():
 
 
 @router.post("/run", response_model=JobResponse)
-async def run_job(request: JobRequest):
+async def run_job(
+    request: Request,
+    prompt: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    dataset: Optional[UploadFile] = File(None),
+):
     """Run complete pipeline: prompt → YAML → training → R2 upload"""
-    job_id = job_service.create_job(request.prompt, request.user_id)
+    content_type = request.headers.get("content-type", "")
+    request_prompt = prompt
+    request_user_id = user_id or "anonymous"
+    dataset_upload = dataset
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception as parse_error:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {parse_error}")
+        request_prompt = body.get("prompt")
+        request_user_id = body.get("user_id", "anonymous")
+        dataset_upload = None
+
+    if not request_prompt:
+        raise HTTPException(status_code=400, detail="'prompt' field is required")
+
+    job_service.purge_expired_datasets()
+
+    job_id = job_service.create_job(request_prompt, request_user_id)
     
     try:
         # Update job status
         job_service.update_job_status(job_id, "generating")
+
+        dataset_metadata = None
+        if dataset_upload is not None:
+            try:
+                dataset_metadata = job_service.stage_dataset(job_id, dataset_upload)
+            except ValueError as staging_error:
+                job_service.update_job_status(job_id, "error", error=str(staging_error))
+                raise HTTPException(status_code=400, detail=str(staging_error))
+            except Exception as staging_error:
+                job_service.update_job_status(job_id, "error", error=str(staging_error))
+                raise HTTPException(status_code=500, detail=str(staging_error))
         
         # Generate YAML using OpenAI
         try:
-            config = ai_service.generate_yaml_config(request.prompt, PROMPT_TEMPLATE)
+            dataset_hint = "DATASET_UPLOAD: present" if dataset_metadata else "DATASET_UPLOAD: none"
+            if dataset_metadata and dataset_metadata.get("num_classes"):
+                dataset_hint += f" | NUM_CLASSES: {dataset_metadata['num_classes']}"
+            config = ai_service.generate_yaml_config(
+                request_prompt,
+                PROMPT_TEMPLATE,
+                dataset_hint=dataset_hint,
+            )
             print(f"DEBUG: Config generated successfully!")
             print(f"DEBUG: Config keys: {list(config.keys()) if config else 'None'}")
         except ValueError as e:
@@ -91,9 +141,36 @@ async def run_job(request: JobRequest):
             job_service.update_job_status(job_id, "error", error=str(e))
             raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
         
+        if dataset_metadata:
+            dataset_cfg = config.get("dataset") if isinstance(config, dict) else None
+            if not isinstance(dataset_cfg, dict):
+                dataset_cfg = {}
+            dataset_cfg.setdefault("name", "custom")
+            params_cfg = dataset_cfg.get("params")
+            if not isinstance(params_cfg, dict):
+                params_cfg = {}
+            params_cfg["zip_path"] = dataset_metadata["path"]
+            params_cfg.setdefault("task_type", "supervised")
+            dataset_cfg["params"] = params_cfg
+            config["dataset"] = dataset_cfg
+
+            num_classes = dataset_metadata.get("num_classes")
+            if num_classes:
+                model_cfg = config.get("model") if isinstance(config, dict) else None
+                if not isinstance(model_cfg, dict):
+                    model_cfg = {}
+                params_model = model_cfg.get("params")
+                if not isinstance(params_model, dict):
+                    params_model = {}
+                params_model["num_classes"] = int(num_classes)
+                model_cfg["params"] = params_model
+                config["model"] = model_cfg
+
+        job_service.update_job_status(job_id, "generating", config=config)
+
         # Save config to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            yaml.dump(config, f)
+            yaml.safe_dump(config, f, sort_keys=False)
             config_path = f.name
         
         # Start training in background

@@ -15,7 +15,12 @@ class AIService:
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
     
-    def generate_yaml_config(self, prompt: str, system_prompt: str) -> Dict:
+    def generate_yaml_config(
+        self,
+        prompt: str,
+        system_prompt: str,
+        dataset_hint: Optional[str] = None,
+    ) -> Dict:
         """
         Generate YAML configuration from user prompt using OpenAI
         
@@ -30,7 +35,12 @@ class AIService:
             ValueError: If YAML parsing fails
             Exception: If OpenAI API call fails
         """
-        full_prompt = f"USER_REQUEST: {prompt}\n---\nYAML:"
+        prompt_parts = [f"USER_REQUEST: {prompt}"]
+        if dataset_hint:
+            prompt_parts.append(dataset_hint)
+        prompt_parts.append("---")
+        prompt_parts.append("YAML:")
+        full_prompt = "\n".join(prompt_parts)
         
         try:
             response = self.client.chat.completions.create(
