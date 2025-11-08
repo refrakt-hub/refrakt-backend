@@ -1,6 +1,6 @@
 """Job-related Pydantic models"""
 
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel
 
 
@@ -47,4 +47,13 @@ class JobArtifactsResponse(BaseModel):
     job_id: str
     artifacts: List[JobArtifact]
     r2_uploaded: bool
+
+
+class RunResponse(BaseModel):
+    """Unified response for /run endpoint covering assistant and job paths."""
+
+    mode: Literal["assistant", "job"]
+    message: str
+    job: Optional[JobResponse] = None
+    conversation_id: Optional[str] = None
 

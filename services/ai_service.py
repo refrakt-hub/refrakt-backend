@@ -20,7 +20,8 @@ class AIService:
         """Initialize OpenAI client"""
         settings = get_settings()
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = settings.OPENAI_MODEL
+        self.config_model = settings.OPENAI_CONFIG_MODEL
+        self.conversation_model = settings.OPENAI_CONVERSATION_MODEL
     
     def generate_yaml_config(
         self,
@@ -66,7 +67,7 @@ class AIService:
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.config_model,
                 messages=[
                     {
                         "role": "system",
@@ -132,6 +133,28 @@ class AIService:
         except Exception as e:
             raise Exception(f"OpenAI API error: {str(e)}")
     
+    def generate_conversation_turn(
+        self,
+        messages: list,
+        temperature: Optional[float] = None,
+        max_completion_tokens: int = 800,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Generate conversational response using the lightweight model."""
+        params: Dict[str, Any] = {
+            "model": self.conversation_model,
+            "messages": messages,
+        }
+        if temperature is not None:
+            params["temperature"] = temperature
+        if max_completion_tokens:
+            params["max_completion_tokens"] = max_completion_tokens
+        if response_format:
+            params["response_format"] = response_format
+
+        response = self.client.chat.completions.create(**params)
+        return response.choices[0].message.content.strip()
+
     def _clean_yaml_text(self, yaml_text: str) -> str:
         """Clean YAML text by removing markdown code blocks"""
         yaml_text = yaml_text.strip("` \n")
@@ -153,11 +176,11 @@ class AIService:
         """Test OpenAI API connection"""
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.conversation_model,
                 messages=[
                     {"role": "user", "content": "Hello"}
                 ],
-                max_tokens=5
+                max_completion_tokens=10
             )
             return {
                 "status": "success",

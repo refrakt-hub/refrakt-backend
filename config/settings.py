@@ -15,6 +15,15 @@ class Settings:
     # OpenAI Configuration
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    OPENAI_CONVERSATION_MODEL: str = os.getenv("OPENAI_CONVERSATION_MODEL", os.getenv("OPENAI_LIGHT_MODEL", "o4-mini"))
+    OPENAI_CONFIG_MODEL: str = os.getenv("OPENAI_CONFIG_MODEL", OPENAI_MODEL)
+    ASSISTANT_ENABLED: bool = os.getenv("ASSISTANT_ENABLED", "true").lower() in {"1", "true", "yes"}
+    ASSISTANT_RETRIEVAL_ENABLED: bool = os.getenv("ASSISTANT_RETRIEVAL_ENABLED", "true").lower() in {"1", "true", "yes"}
+    ASSISTANT_INDEX_PATH: Path = Path(os.getenv("ASSISTANT_INDEX_PATH", "./backend/cache/assistant_index")).resolve()
+    ASSISTANT_EMBEDDING_MODEL: str = os.getenv("ASSISTANT_EMBEDDING_MODEL", "text-embedding-3-small")
+    ASSISTANT_MAX_CONTEXT_CHUNKS: int = int(os.getenv("ASSISTANT_MAX_CONTEXT_CHUNKS", "4"))
+    ASSISTANT_MAX_JOB_CHUNKS: int = int(os.getenv("ASSISTANT_MAX_JOB_CHUNKS", "3"))
+    ASSISTANT_REINDEX_ON_START: bool = os.getenv("ASSISTANT_REINDEX_ON_START", "false").lower() in {"1", "true", "yes"}
     
     # Cloudflare R2 Configuration
     R2_ACCOUNT_ID: Optional[str] = os.getenv("R2_ACCOUNT_ID")
@@ -75,6 +84,9 @@ class Settings:
         
         # Create jobs directory if it doesn't exist
         self.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+        if self.ASSISTANT_RETRIEVAL_ENABLED:
+            self.ASSISTANT_INDEX_PATH.mkdir(parents=True, exist_ok=True)
     
     @property
     def is_r2_configured(self) -> bool:

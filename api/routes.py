@@ -22,12 +22,15 @@ from models import (
     JobStatus,
     JobArtifact,
     JobArtifactsResponse,
+    RunResponse,
 )
 from config import get_settings
 from services.ai_service import AIService
 from services.r2_service import R2Service
 from services.job_service import JobService
 from services.websocket_service import WebSocketService
+from services.assistant_service import AssistantService
+from services.job_context_service import JobContextService
 from utils import classify_artifact, load_prompt_template
 
 # Initialize services
@@ -36,6 +39,8 @@ r2_service = R2Service()
 websocket_service = WebSocketService()
 job_service = JobService(r2_service, websocket_service)
 ai_service = AIService()
+job_context_service = JobContextService(job_service)
+assistant_service = AssistantService(ai_service, job_context_service)
 
 # Load prompt template
 PROMPT_TEMPLATE = load_prompt_template()
@@ -77,37 +82,15 @@ async def test_r2():
     return r2_service.test_connection()
 
 
-@router.post("/run", response_model=JobResponse)
-async def run_job(
-    request: Request,
-    prompt: Optional[str] = Form(None),
-    user_id: Optional[str] = Form(None),
-    dataset: Optional[UploadFile] = File(None),
-):
-    """Run complete pipeline: prompt → YAML → training → R2 upload"""
-    content_type = request.headers.get("content-type", "")
-    request_prompt = prompt
-    request_user_id = user_id or "anonymous"
-    dataset_upload = dataset
-
-    if "application/json" in content_type:
-        try:
-            body = await request.json()
-        except Exception as parse_error:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {parse_error}")
-        request_prompt = body.get("prompt")
-        request_user_id = body.get("user_id", "anonymous")
-        dataset_upload = None
-
-    if not request_prompt:
-        raise HTTPException(status_code=400, detail="'prompt' field is required")
-
+async def _start_training_job(
+    prompt_text: str,
+    user_id: str,
+    dataset_upload: Optional[UploadFile] = None,
+) -> JobResponse:
     job_service.purge_expired_datasets()
 
-    job_id = job_service.create_job(request_prompt, request_user_id)
-    
+    job_id = job_service.create_job(prompt_text, user_id)
     try:
-        # Update job status
         job_service.update_job_status(job_id, "generating")
 
         dataset_metadata = None
@@ -120,27 +103,24 @@ async def run_job(
             except Exception as staging_error:
                 job_service.update_job_status(job_id, "error", error=str(staging_error))
                 raise HTTPException(status_code=500, detail=str(staging_error))
-        
-        # Generate YAML using OpenAI
+
+        dataset_hint = "DATASET_UPLOAD: present" if dataset_metadata else "DATASET_UPLOAD: none"
+        if dataset_metadata and dataset_metadata.get("num_classes"):
+            dataset_hint += f" | NUM_CLASSES: {dataset_metadata['num_classes']}"
+
         try:
-            dataset_hint = "DATASET_UPLOAD: present" if dataset_metadata else "DATASET_UPLOAD: none"
-            if dataset_metadata and dataset_metadata.get("num_classes"):
-                dataset_hint += f" | NUM_CLASSES: {dataset_metadata['num_classes']}"
             config = ai_service.generate_yaml_config(
-                request_prompt,
+                prompt_text,
                 PROMPT_TEMPLATE,
                 dataset_hint=dataset_hint,
             )
-            print(f"DEBUG: Config generated successfully!")
-            print(f"DEBUG: Config keys: {list(config.keys()) if config else 'None'}")
         except ValueError as e:
             job_service.update_job_status(job_id, "error", error=str(e))
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            print(f"DEBUG: OpenAI API error: {str(e)}")
             job_service.update_job_status(job_id, "error", error=str(e))
             raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
-        
+
         if dataset_metadata:
             dataset_cfg = config.get("dataset") if isinstance(config, dict) else None
             if not isinstance(dataset_cfg, dict):
@@ -168,25 +148,127 @@ async def run_job(
 
         job_service.update_job_status(job_id, "generating", config=config)
 
-        # Save config to temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            yaml.safe_dump(config, f, sort_keys=False)
-            config_path = f.name
-        
-        # Start training in background
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as handle:
+            yaml.safe_dump(config, handle, sort_keys=False)
+            config_path = handle.name
+
         asyncio.create_task(job_service.run_job(job_id, config, config_path))
-        
+
         return JobResponse(
             job_id=job_id,
             status="running",
-            message="Job started successfully"
+            message="Job started successfully",
         )
-        
     except HTTPException:
         raise
-    except Exception as e:
-        job_service.update_job_status(job_id, "error", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Error running job: {str(e)}")
+    except Exception as exc:
+        job_service.update_job_status(job_id, "error", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Error running job: {str(exc)}")
+
+
+@router.post("/run", response_model=RunResponse)
+async def run_job(
+    request: Request,
+    prompt: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    dataset: Optional[UploadFile] = File(None),
+    conversation_id: Optional[str] = Form(None),
+):
+    """Run complete pipeline: prompt → YAML → training → R2 upload"""
+    content_type = request.headers.get("content-type", "")
+    request_prompt = prompt
+    request_user_id = user_id or "anonymous"
+    dataset_upload = dataset
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception as parse_error:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {parse_error}")
+        request_prompt = body.get("prompt")
+        request_user_id = body.get("user_id", "anonymous")
+        conversation_id = body.get("conversation_id") or conversation_id
+        dataset_upload = None
+
+    if not request_prompt:
+        raise HTTPException(status_code=400, detail="'prompt' field is required")
+
+    assistant_result = None
+    effective_prompt = request_prompt
+
+    if settings.ASSISTANT_ENABLED:
+        assistant_result = assistant_service.process_message(
+            message=request_prompt,
+            conversation_id=conversation_id,
+            user_id=request_user_id,
+        )
+        conversation_id = assistant_result.conversation_id
+
+        if assistant_result.intent != "training_request":
+            return RunResponse(
+                mode="assistant",
+                message=assistant_result.reply,
+                job=None,
+                conversation_id=conversation_id,
+            )
+
+        if assistant_result.training_prompt:
+            effective_prompt = assistant_result.training_prompt
+
+    job_payload = await _start_training_job(effective_prompt, request_user_id, dataset_upload)
+
+    return RunResponse(
+        mode="job",
+        message=assistant_result.reply if assistant_result else "Job started successfully",
+        job=job_payload,
+        conversation_id=conversation_id,
+    )
+
+
+@router.post("/assistant")
+async def assistant_endpoint(payload: dict):
+    message = payload.get("message")
+    user_id = payload.get("user_id") or "anonymous"
+    conversation_id = payload.get("conversation_id")
+
+    if not message:
+        raise HTTPException(status_code=400, detail="'message' field is required")
+
+    if not settings.ASSISTANT_ENABLED:
+        raise HTTPException(status_code=503, detail="Assistant features are disabled")
+
+    result = assistant_service.process_message(
+        message=message,
+        conversation_id=conversation_id,
+        user_id=user_id,
+    )
+
+    response = {
+        "intent": result.intent,
+        "message": result.reply,
+        "training_prompt": result.training_prompt,
+        "confidence": result.confidence,
+        "conversation_id": result.conversation_id,
+    }
+
+    if result.intent == "training_request":
+        prompt_text = result.training_prompt or message
+        job_payload = await _start_training_job(prompt_text, user_id)
+        response["job"] = job_payload.model_dump()
+
+    return response
+
+
+@router.post("/assistant/reindex")
+async def assistant_reindex():
+    if not settings.ASSISTANT_ENABLED or not settings.ASSISTANT_RETRIEVAL_ENABLED:
+        raise HTTPException(status_code=503, detail="Assistant retrieval disabled")
+
+    success = assistant_service.rebuild_static_index()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to rebuild assistant index")
+
+    return {"status": "ok"}
 
 
 @router.websocket("/ws/job/{job_id}/logs")

@@ -6,6 +6,7 @@ from .job_models import (
     JobStatus,
     JobArtifact,
     JobArtifactsResponse,
+    RunResponse,
 )
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "JobStatus",
     "JobArtifact",
     "JobArtifactsResponse",
+    "RunResponse",
 ]
 
