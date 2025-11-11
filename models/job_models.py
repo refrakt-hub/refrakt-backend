@@ -15,6 +15,7 @@ class JobResponse(BaseModel):
     job_id: str
     status: str
     message: str
+    queue_job_id: Optional[str] = None
 
 
 class JobStatus(BaseModel):
@@ -29,6 +30,7 @@ class JobStatus(BaseModel):
     error: Optional[str] = None
     logs: Optional[List[str]] = None
     dataset: Optional[dict] = None
+    queue_job_id: Optional[str] = None
 
 
 class JobArtifact(BaseModel):

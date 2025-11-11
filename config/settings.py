@@ -38,6 +38,16 @@ class Settings:
     # Application Configuration
     MAX_FILE_SIZE: int = 500 * 1024 * 1024  # 500MB
     
+    # Queue / background job configuration
+    QUEUE_URL: Optional[str] = os.getenv("QUEUE_URL")
+    QUEUE_NAME: str = os.getenv("QUEUE_NAME", "default")
+    QUEUE_DEFAULT_TIMEOUT: int = int(os.getenv("QUEUE_DEFAULT_TIMEOUT", "7200"))
+    QUEUE_RETRY_LIMIT: int = int(os.getenv("QUEUE_RETRY_LIMIT", "3"))
+    QUEUE_RETRY_BACKOFF: float = float(os.getenv("QUEUE_RETRY_BACKOFF", "2.0"))
+    QUEUE_VISIBILITY_TIMEOUT: int = int(os.getenv("QUEUE_VISIBILITY_TIMEOUT", "30"))
+    QUEUE_WORKER_CONCURRENCY: int = int(os.getenv("QUEUE_WORKER_CONCURRENCY", "1"))
+    QUEUE_RETRY_DELAY: float = float(os.getenv("QUEUE_RETRY_DELAY", "30"))
+
     # Prompt Template Path
     PROMPT_TEMPLATE_PATH: Path = Path("./backend/config/PROMPT.md")
     
@@ -82,6 +92,9 @@ class Settings:
         print(f"DEBUG: JOBS_DIR: {self.JOBS_DIR}")
         print(f"DEBUG: Current working directory: {Path.cwd()}")
         
+        if not self.QUEUE_URL:
+            raise ValueError("QUEUE_URL environment variable is required for job processing")
+
         # Create jobs directory if it doesn't exist
         self.JOBS_DIR.mkdir(parents=True, exist_ok=True)
 

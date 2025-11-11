@@ -1,7 +1,6 @@
 """API route handlers"""
 
 import asyncio
-import tempfile
 import yaml
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +28,7 @@ from services.ai_service import AIService
 from services.r2_service import R2Service
 from services.job_service import JobService
 from services.websocket_service import WebSocketService
+from services.queue import enqueue_training_job
 from services.assistant_service import AssistantService
 from services.job_context_service import JobContextService
 from utils import classify_artifact, load_prompt_template
@@ -86,6 +86,8 @@ async def _start_training_job(
     prompt_text: str,
     user_id: str,
     dataset_upload: Optional[UploadFile] = None,
+    *,
+    source: str = "api",
 ) -> JobResponse:
     job_service.purge_expired_datasets()
 
@@ -148,16 +150,22 @@ async def _start_training_job(
 
         job_service.update_job_status(job_id, "generating", config=config)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as handle:
+        job_dir = settings.JOBS_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        config_path = job_dir / "config.generated.yaml"
+        with config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, sort_keys=False)
-            config_path = handle.name
 
-        asyncio.create_task(job_service.run_job(job_id, config, config_path))
+        job_service.record_job_configuration(job_id, config, str(config_path))
+
+        queue_job_id = await enqueue_training_job(job_id, source=source)
+        job_service.update_job_status(job_id, "queued", queue_job_id=queue_job_id)
 
         return JobResponse(
             job_id=job_id,
-            status="running",
-            message="Job started successfully",
+            status="queued",
+            message="Job queued successfully",
+            queue_job_id=queue_job_id,
         )
     except HTTPException:
         raise
@@ -219,7 +227,7 @@ async def run_job(
 
     return RunResponse(
         mode="job",
-        message=assistant_result.reply if assistant_result else "Job started successfully",
+        message=assistant_result.reply if assistant_result else "Job queued successfully",
         job=job_payload,
         conversation_id=conversation_id,
     )
@@ -253,7 +261,7 @@ async def assistant_endpoint(payload: dict):
 
     if result.intent == "training_request":
         prompt_text = result.training_prompt or message
-        job_payload = await _start_training_job(prompt_text, user_id)
+        job_payload = await _start_training_job(prompt_text, user_id, source="assistant")
         response["job"] = job_payload.model_dump()
 
     return response
@@ -286,11 +294,6 @@ async def websocket_logs(websocket: WebSocket, job_id: str):
     await websocket_service.add_connection(job_id, websocket)
     
     try:
-        # Send existing logs
-        if "logs" in job:
-            for log_line in job["logs"]:
-                await websocket.send_text(log_line)
-        
         # Keep connection alive
         while True:
             try:

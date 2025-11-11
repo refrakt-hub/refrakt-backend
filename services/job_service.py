@@ -3,7 +3,6 @@
 import asyncio
 import os
 import shutil
-import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta
@@ -15,6 +14,7 @@ from fastapi import UploadFile
 from config import get_settings
 from services.r2_service import R2Service
 from services.websocket_service import WebSocketService
+from services.job_repository import get_job_repository, JobRepository
 
 DATASET_TTL_SECONDS = 3600
 DATASET_ROOT = Path("/tmp/datasets")
@@ -28,7 +28,7 @@ class JobService:
         self.settings = get_settings()
         self.r2_service = r2_service
         self.websocket_service = websocket_service
-        self.jobs: Dict[str, dict] = {}
+        self.repository: JobRepository = get_job_repository()
         self.dataset_root = DATASET_ROOT
         self.dataset_root.mkdir(parents=True, exist_ok=True)
         self.dataset_ttl_seconds = DATASET_TTL_SECONDS
@@ -45,26 +45,15 @@ class JobService:
             Job ID
         """
         job_id = str(uuid.uuid4())
-        
-        self.jobs[job_id] = {
-            "job_id": job_id,
-            "status": "pending",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "prompt": prompt,
-            "user_id": user_id,
-            "logs": [],
-            "r2_uploaded": False,
-            "dataset": None,
-        }
-        
+        self.repository.create_job(job_id, prompt, user_id)
         return job_id
 
     def purge_expired_datasets(self):
         """Remove dataset directories that have exceeded their TTL."""
         now = datetime.utcnow()
-        for job_id, job_data in list(self.jobs.items()):
-            dataset_meta = job_data.get("dataset")
+        jobs = self.repository.list_jobs(limit=500)
+        for job in jobs:
+            dataset_meta = job.get("dataset")
             if not dataset_meta:
                 continue
             expires_at = dataset_meta.get("expires_at")
@@ -74,14 +63,15 @@ class JobService:
                 expires_dt = datetime.fromisoformat(expires_at)
             except ValueError:
                 continue
-            if expires_dt <= now and job_data.get("status") != "running":
+            if expires_dt <= now and job.get("status") != "running":
                 dir_path = Path(dataset_meta.get("dir", ""))
                 self._delete_dataset_dir(dir_path)
-                job_data["dataset"] = None
+                self.repository.update_job(job["job_id"], dataset=None)
 
     def stage_dataset(self, job_id: str, upload: UploadFile) -> dict:
         """Persist an uploaded dataset zip for a job."""
-        if job_id not in self.jobs:
+        job = self.repository.get_job(job_id, include_logs=False)
+        if not job:
             raise ValueError(f"Unknown job_id: {job_id}")
         filename = upload.filename or "dataset.zip"
         if not filename.lower().endswith(".zip"):
@@ -119,12 +109,17 @@ class JobService:
             metadata["num_classes"] = analysis["num_classes"]
             metadata["class_names"] = analysis.get("class_names")
 
-        self.jobs[job_id]["dataset"] = metadata
+        self.repository.update_job(job_id, dataset=metadata)
         return metadata
+
+    def record_job_configuration(self, job_id: str, config: dict, config_path: str) -> None:
+        """Persist generated configuration metadata."""
+        self.repository.update_job(job_id, config=config, config_path=config_path)
 
     def ensure_dataset_active(self, job_id: str):
         """Ensure a staged dataset is still valid before training."""
-        dataset_meta = self.jobs.get(job_id, {}).get("dataset")
+        job = self.repository.get_job(job_id, include_logs=False)
+        dataset_meta = (job or {}).get("dataset")
         if not dataset_meta:
             return
 
@@ -136,7 +131,7 @@ class JobService:
                 expires_dt = None
             if expires_dt and expires_dt <= datetime.utcnow():
                 self._delete_dataset_dir(Path(dataset_meta.get("dir", "")))
-                self.jobs[job_id]["dataset"] = None
+                self.repository.update_job(job_id, dataset=None)
                 raise ValueError("Dataset expired before training could start")
 
         dataset_path = Path(dataset_meta.get("path", ""))
@@ -187,37 +182,30 @@ class JobService:
         job_id: str,
         status: str,
         config: Optional[dict] = None,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        **extra_fields: object,
     ):
         """Update job status"""
-        if job_id not in self.jobs:
-            return
-        
-        self.jobs[job_id]["status"] = status
-        self.jobs[job_id]["updated_at"] = datetime.now().isoformat()
-        
+        payload: Dict[str, object] = {"status": status}
         if config is not None:
-            self.jobs[job_id]["config"] = config
+            payload["config"] = config
         if error is not None:
-            self.jobs[job_id]["error"] = error
+            payload["error"] = error
+        if extra_fields:
+            payload.update(extra_fields)
+        self.repository.update_job(job_id, **payload)
     
     def add_log(self, job_id: str, log_line: str):
         """Add log line to job"""
-        if job_id not in self.jobs:
-            return
-        
-        if "logs" not in self.jobs[job_id]:
-            self.jobs[job_id]["logs"] = []
-        
-        self.jobs[job_id]["logs"].append(log_line)
+        self.repository.append_log(job_id, log_line)
     
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get job by ID"""
-        return self.jobs.get(job_id)
+        return self.repository.get_job(job_id)
     
     def list_jobs(self) -> list:
         """List all jobs"""
-        return list(self.jobs.values())
+        return self.repository.list_jobs()
     
     def cleanup_job_directory(self, job_id: str, job_dir: Path) -> bool:
         """
@@ -243,21 +231,26 @@ class JobService:
             print(f"Error cleaning up job directory {job_dir}: {str(e)}")
             return False
     
-    async def run_job(
-        self,
-        job_id: str,
-        config: dict,
-        config_path: str
-    ):
+    async def run_job(self, job_id: str):
         """
         Run refrakt CLI job in background
         
         Args:
             job_id: Job identifier
-            config: Parsed YAML config
-            config_path: Path to YAML config file
         """
         try:
+            job_record = self.repository.get_job(job_id, include_logs=False)
+            if not job_record:
+                raise ValueError(f"Job {job_id} not found")
+
+            config = job_record.get("config")
+            config_path = job_record.get("config_path")
+
+            if not isinstance(config, dict):
+                raise ValueError(f"Job {job_id} missing configuration payload")
+            if not isinstance(config_path, str):
+                raise ValueError(f"Job {job_id} missing configuration path")
+
             # Create output directory
             output_dir = self.settings.JOBS_DIR / job_id
             output_dir.mkdir(exist_ok=True)
@@ -373,8 +366,11 @@ class JobService:
                     output_dir
                 )
                 
-                self.jobs[job_id]["r2_uploaded"] = upload_stats["uploaded"] > 0
-                self.jobs[job_id]["r2_stats"] = upload_stats
+                self.repository.update_job(
+                    job_id,
+                    r2_uploaded=upload_stats["uploaded"] > 0,
+                    r2_stats=upload_stats,
+                )
                 
                 # Store artifact metadata before cleanup (for listing after cleanup)
                 artifact_metadata = []
@@ -393,7 +389,7 @@ class JobService:
                             except Exception as e:
                                 print(f"Error collecting artifact metadata for {file_path}: {str(e)}")
                 
-                self.jobs[job_id]["artifact_metadata"] = artifact_metadata
+                self.repository.update_job(job_id, artifact_metadata=artifact_metadata)
                 
                 # Clean up local files if upload was successful
                 # Only cleanup if all files were uploaded successfully (no failures)
@@ -408,7 +404,7 @@ class JobService:
                             job_id,
                             "Local files cleaned up successfully"
                         )
-                        self.jobs[job_id]["local_cleaned"] = True
+                        self.repository.update_job(job_id, local_cleaned=True)
                     else:
                         await self.websocket_service.broadcast_log(
                             job_id,
@@ -421,7 +417,7 @@ class JobService:
                     )
                 
                 self.update_job_status(job_id, "completed")
-                self.jobs[job_id]["result_path"] = str(output_dir)
+                self.repository.update_job(job_id, result_path=str(output_dir))
                 
                 await self.websocket_service.broadcast_log(
                     job_id,

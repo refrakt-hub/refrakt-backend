@@ -19,6 +19,8 @@ dependencies = [
     "websockets>=12.0",
     "simple-vector-store>=0.0.3",
     "numpy>=1.24.0",
+    "redis>=5.0.0",
+    "saq[redis]>=1.3.0",
 ]
 
 [tool.setuptools]
