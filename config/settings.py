@@ -47,6 +47,23 @@ class Settings:
     QUEUE_VISIBILITY_TIMEOUT: int = int(os.getenv("QUEUE_VISIBILITY_TIMEOUT", "30"))
     QUEUE_WORKER_CONCURRENCY: int = int(os.getenv("QUEUE_WORKER_CONCURRENCY", "1"))
     QUEUE_RETRY_DELAY: float = float(os.getenv("QUEUE_RETRY_DELAY", "30"))
+    QUEUE_MAX_PENDING: int = int(os.getenv("QUEUE_MAX_PENDING", "40"))
+    QUEUE_MAX_AGE_SECONDS: int = int(os.getenv("QUEUE_MAX_AGE_SECONDS", "600"))
+
+    # Observability
+    PROMETHEUS_ENABLED: bool = os.getenv("PROMETHEUS_ENABLED", "true").lower() in {"1", "true", "yes"}
+    PROMETHEUS_METRICS_ROUTE: str = os.getenv("PROMETHEUS_METRICS_ROUTE", "/metrics")
+    PROMETHEUS_BEARER_TOKEN: Optional[str] = os.getenv("PROMETHEUS_BEARER_TOKEN")
+    PROMETHEUS_QUEUE_POLL_INTERVAL: float = float(os.getenv("PROMETHEUS_QUEUE_POLL_INTERVAL", "5.0"))
+
+    # Rate limiting / admission control
+    RATE_LIMIT_ENABLED: bool = os.getenv("RATE_LIMIT_ENABLED", "true").lower() in {"1", "true", "yes"}
+    RATE_LIMIT_RUN_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_RUN_PER_MINUTE", "6"))
+    RATE_LIMIT_RUN_BURST: int = int(os.getenv("RATE_LIMIT_RUN_BURST", "10"))
+    RATE_LIMIT_ASSISTANT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_ASSISTANT_PER_MINUTE", "30"))
+    RATE_LIMIT_ASSISTANT_BURST: int = int(os.getenv("RATE_LIMIT_ASSISTANT_BURST", "45"))
+    RATE_LIMIT_PREMIUM_MULTIPLIER: float = float(os.getenv("RATE_LIMIT_PREMIUM_MULTIPLIER", "3.0"))
+    CLIENT_IP_HEADER: str = os.getenv("CLIENT_IP_HEADER", "CF-Connecting-IP")
 
     # Prompt Template Path
     PROMPT_TEMPLATE_PATH: Path = Path("./backend/config/PROMPT.md")
@@ -94,6 +111,9 @@ class Settings:
         
         if not self.QUEUE_URL:
             raise ValueError("QUEUE_URL environment variable is required for job processing")
+
+        if not self.PROMETHEUS_METRICS_ROUTE.startswith("/"):
+            raise ValueError("PROMETHEUS_METRICS_ROUTE must start with '/'")
 
         # Create jobs directory if it doesn't exist
         self.JOBS_DIR.mkdir(parents=True, exist_ok=True)

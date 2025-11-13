@@ -11,20 +11,39 @@ Features:
 
 import sys
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import router
 from config import get_settings
+from services.observability import init_observability
+from services.queue_monitor import QueueMonitor
+from services.rate_limiter import init_rate_limiter, shutdown_rate_limiter
 
 # Initialize settings
 settings = get_settings()
+queue_monitor = QueueMonitor(settings=settings)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_observability(app, settings)
+    await init_rate_limiter(settings)
+    await queue_monitor.start()
+    try:
+        yield
+    finally:
+        await queue_monitor.stop()
+        await shutdown_rate_limiter()
+
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Refrakt Backend API",
     description="Backend API for Refrakt ML Framework with R2 Storage",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Add CORS middleware

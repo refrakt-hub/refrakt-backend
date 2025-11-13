@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -31,6 +32,11 @@ from services.websocket_service import WebSocketService
 from services.queue import enqueue_training_job
 from services.assistant_service import AssistantService
 from services.job_context_service import JobContextService
+from services.rate_limiter import (
+    get_assistant_rate_limit_dependencies,
+    get_run_rate_limit_dependencies,
+)
+from services.admission_control import ensure_queue_capacity
 from utils import classify_artifact, load_prompt_template
 
 # Initialize services
@@ -47,6 +53,16 @@ PROMPT_TEMPLATE = load_prompt_template()
 
 # Create router
 router = APIRouter()
+
+_RUN_DEPENDENCIES = [
+    *get_run_rate_limit_dependencies(),
+    Depends(ensure_queue_capacity),
+]
+
+_ASSISTANT_DEPENDENCIES = [
+    *get_assistant_rate_limit_dependencies(),
+    Depends(ensure_queue_capacity),
+]
 
 
 @router.get("/")
@@ -174,7 +190,11 @@ async def _start_training_job(
         raise HTTPException(status_code=500, detail=f"Error running job: {str(exc)}")
 
 
-@router.post("/run", response_model=RunResponse)
+@router.post(
+    "/run",
+    response_model=RunResponse,
+    dependencies=_RUN_DEPENDENCIES,
+)
 async def run_job(
     request: Request,
     prompt: Optional[str] = Form(None),
@@ -233,7 +253,10 @@ async def run_job(
     )
 
 
-@router.post("/assistant")
+@router.post(
+    "/assistant",
+    dependencies=_ASSISTANT_DEPENDENCIES,
+)
 async def assistant_endpoint(payload: dict):
     message = payload.get("message")
     user_id = payload.get("user_id") or "anonymous"

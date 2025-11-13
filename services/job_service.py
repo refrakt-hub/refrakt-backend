@@ -5,7 +5,7 @@ import os
 import shutil
 import uuid
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -15,6 +15,7 @@ from config import get_settings
 from services.r2_service import R2Service
 from services.websocket_service import WebSocketService
 from services.job_repository import get_job_repository, JobRepository
+from services.metrics import record_job_status_transition
 
 DATASET_TTL_SECONDS = 3600
 DATASET_ROOT = Path("/tmp/datasets")
@@ -186,6 +187,10 @@ class JobService:
         **extra_fields: object,
     ):
         """Update job status"""
+        previous_job = self.repository.get_job(job_id, include_logs=False)
+        now = datetime.now(timezone.utc)
+        timestamp_iso = now.isoformat()
+
         payload: Dict[str, object] = {"status": status}
         if config is not None:
             payload["config"] = config
@@ -193,7 +198,20 @@ class JobService:
             payload["error"] = error
         if extra_fields:
             payload.update(extra_fields)
+
+        if status == "queued":
+            payload.setdefault("queued_at", timestamp_iso)
+        elif status == "running":
+            payload.setdefault("started_at", timestamp_iso)
+        elif status in {"completed", "error", "cancelled"}:
+            payload.setdefault("finished_at", timestamp_iso)
+
         self.repository.update_job(job_id, **payload)
+
+        try:
+            record_job_status_transition(previous_job, status, now)
+        except Exception:
+            pass
     
     def add_log(self, job_id: str, log_line: str):
         """Add log line to job"""

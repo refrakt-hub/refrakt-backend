@@ -7,6 +7,7 @@ from functools import lru_cache
 from saq import Queue
 
 from config import get_settings
+from services.metrics import record_job_enqueued
 
 
 @lru_cache(maxsize=1)
@@ -34,6 +35,7 @@ async def enqueue_training_job(job_id: str, *, source: str = "api") -> str:
         retry_delay=settings.QUEUE_RETRY_DELAY,
         retry_backoff=settings.QUEUE_RETRY_BACKOFF,
     )
+    record_job_enqueued(source)
     return job.key
 
 
