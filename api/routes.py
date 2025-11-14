@@ -1,6 +1,7 @@
 """API route handlers"""
 
 import asyncio
+import logging
 import yaml
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,11 @@ from fastapi import (
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
+    status,
 )
+from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from models import (
     JobResponse,
     JobStatus,
@@ -34,10 +39,14 @@ from services.assistant_service import AssistantService
 from services.job_context_service import JobContextService
 from services.rate_limiter import (
     get_assistant_rate_limit_dependencies,
+    get_default_rate_limit_dependencies,
     get_run_rate_limit_dependencies,
 )
 from services.admission_control import ensure_queue_capacity
+from services.job_repository import get_job_repository
 from utils import classify_artifact, load_prompt_template
+
+logger = logging.getLogger(__name__)
 
 # Initialize services
 settings = get_settings()
@@ -51,8 +60,10 @@ assistant_service = AssistantService(ai_service, job_context_service)
 # Load prompt template
 PROMPT_TEMPLATE = load_prompt_template()
 
-# Create router
-router = APIRouter()
+# Create router with default rate limiting
+# Note: Specific endpoints can override with their own dependencies
+_DEFAULT_DEPENDENCIES = get_default_rate_limit_dependencies()
+router = APIRouter(dependencies=_DEFAULT_DEPENDENCIES)
 
 _RUN_DEPENDENCIES = [
     *get_run_rate_limit_dependencies(),
@@ -65,7 +76,7 @@ _ASSISTANT_DEPENDENCIES = [
 ]
 
 
-@router.get("/")
+@router.get("/", dependencies=[])  # Exclude from rate limiting (root endpoint)
 async def root():
     """Root endpoint - API information"""
     return {
@@ -74,6 +85,7 @@ async def root():
         "r2_configured": r2_service.is_configured(),
         "docs": "/docs",
         "endpoints": {
+            "health": "/health",
             "run_job": "/run",
             "job_status": "/job/{job_id}",
             "jobs_list": "/jobs",
@@ -86,16 +98,97 @@ async def root():
     }
 
 
-@router.get("/test-openai")
+@router.get("/test-openai", dependencies=[])  # Exclude from rate limiting (test endpoint)
 async def test_openai():
     """Test OpenAI API connection"""
     return ai_service.test_connection()
 
 
-@router.get("/test-r2")
+@router.get("/test-r2", dependencies=[])  # Exclude from rate limiting (test endpoint)
 async def test_r2():
     """Test R2 connection and permissions"""
     return r2_service.test_connection()
+
+
+@router.get("/health", dependencies=[])  # Exclude from rate limiting (health check)
+async def health_check():
+    """
+    Health check endpoint for monitoring and load balancers.
+    Returns 200 if healthy, 503 if unhealthy.
+    Checks Redis connectivity and queue accessibility.
+    This endpoint is excluded from rate limiting.
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "checks": {}
+    }
+    overall_healthy = True
+    
+    # Check Redis connectivity
+    redis_check = {"status": "ok"}
+    if not settings.QUEUE_URL:
+        redis_check["status"] = "error"
+        redis_check["error"] = "QUEUE_URL not configured"
+        overall_healthy = False
+    else:
+        try:
+            # Create a test Redis connection with timeout
+            test_redis = Redis.from_url(
+                settings.QUEUE_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            # Try to ping Redis
+            await asyncio.wait_for(test_redis.ping(), timeout=2.0)
+            await test_redis.aclose()
+            redis_check["status"] = "ok"
+        except (RedisConnectionError, RedisTimeoutError, asyncio.TimeoutError) as e:
+            redis_check["status"] = "error"
+            redis_check["error"] = str(e)
+            overall_healthy = False
+        except Exception as e:
+            redis_check["status"] = "error"
+            redis_check["error"] = f"Unexpected error: {str(e)}"
+            overall_healthy = False
+    
+    health_status["checks"]["redis"] = redis_check
+    
+    # Check queue/job repository accessibility
+    queue_check = {"status": "ok"}
+    if not settings.QUEUE_URL:
+        queue_check["status"] = "error"
+        queue_check["error"] = "QUEUE_URL not configured"
+        overall_healthy = False
+    else:
+        try:
+            repository = get_job_repository()
+            # Try to list jobs (with limit to keep it fast)
+            await asyncio.wait_for(
+                asyncio.to_thread(repository.list_jobs, limit=1),
+                timeout=2.0
+            )
+            queue_check["status"] = "ok"
+        except asyncio.TimeoutError:
+            queue_check["status"] = "error"
+            queue_check["error"] = "Queue access timeout"
+            overall_healthy = False
+        except Exception as e:
+            queue_check["status"] = "error"
+            queue_check["error"] = str(e)
+            overall_healthy = False
+    
+    health_status["checks"]["queue"] = queue_check
+    
+    # Update overall status
+    if not overall_healthy:
+        health_status["status"] = "unhealthy"
+    
+    # Return appropriate status code
+    status_code = status.HTTP_200_OK if overall_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(content=health_status, status_code=status_code)
 
 
 async def _start_training_job(
@@ -302,7 +395,7 @@ async def assistant_reindex():
     return {"status": "ok"}
 
 
-@router.websocket("/ws/job/{job_id}/logs")
+@router.websocket("/ws/job/{job_id}/logs")  # WebSocket endpoints don't use rate limiting dependencies
 async def websocket_logs(websocket: WebSocket, job_id: str):
     """WebSocket endpoint for real-time log streaming"""
     await websocket.accept()
@@ -327,7 +420,7 @@ async def websocket_logs(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         await websocket_service.remove_connection(job_id, websocket)
     except Exception as e:
-        print(f"WebSocket error for job {job_id}: {str(e)}")
+        logger.error(f"WebSocket error for job {job_id}: {str(e)}", exc_info=True)
         await websocket_service.remove_connection(job_id, websocket)
 
 
@@ -347,7 +440,7 @@ async def get_job_status(job_id: str):
     try:
         return JobStatus(**job_data)
     except Exception as e:
-        print(f"DEBUG: Error creating JobStatus for job {job_id}: {str(e)}")
+        logger.debug(f"Error creating JobStatus for job {job_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error creating job status: {str(e)}")
 
 
@@ -430,7 +523,7 @@ async def list_job_artifacts(job_id: str):
                     )
                     artifacts.append(artifact)
                 except Exception as e:
-                    print(f"Error processing file {file_path}: {str(e)}")
+                    logger.warning(f"Error processing file {file_path}: {str(e)}", exc_info=True)
     
     return JobArtifactsResponse(
         job_id=job_id,

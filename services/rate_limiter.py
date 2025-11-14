@@ -114,6 +114,7 @@ def _build_rate_limiters(settings: Settings) -> dict[str, List[Depends]]:
     dependencies: dict[str, List[Depends]] = {
         "run": [],
         "assistant": [],
+        "default": [],
     }
     if not settings.RATE_LIMIT_ENABLED:
         return dependencies
@@ -132,6 +133,7 @@ def _build_rate_limiters(settings: Settings) -> dict[str, List[Depends]]:
             enabled=settings.RATE_LIMIT_ENABLED,
         )
 
+    # Specialized rate limiters for high-traffic endpoints
     run_ip_limiter = _tiered(
         times=settings.RATE_LIMIT_RUN_BURST,
         seconds=60,
@@ -148,8 +150,16 @@ def _build_rate_limiters(settings: Settings) -> dict[str, List[Depends]]:
         identifier=user_identifier,
     )
 
+    # Default rate limiter for general endpoints
+    default_limiter = _tiered(
+        times=settings.RATE_LIMIT_DEFAULT_PER_MINUTE,
+        seconds=60,
+        identifier=ip_identifier,
+    )
+
     dependencies["run"] = [Depends(run_ip_limiter), Depends(run_user_limiter)]
     dependencies["assistant"] = [Depends(assistant_limiter)]
+    dependencies["default"] = [Depends(default_limiter)]
     return dependencies
 
 
@@ -164,4 +174,9 @@ def get_run_rate_limit_dependencies() -> List[Depends]:
 def get_assistant_rate_limit_dependencies() -> List[Depends]:
     """Return dependency list for assistant endpoints."""
     return list(_dependencies["assistant"])
+
+
+def get_default_rate_limit_dependencies() -> List[Depends]:
+    """Return dependency list for default/general endpoints."""
+    return list(_dependencies["default"])
 

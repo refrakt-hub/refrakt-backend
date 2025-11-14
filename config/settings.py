@@ -1,16 +1,42 @@
 """Application settings and configuration"""
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv(dotenv_path="./dev.env")
+logger = logging.getLogger(__name__)
+
+
+env_file = os.getenv("ENV_FILE", ".env")
+if os.path.exists(env_file):
+    load_dotenv(dotenv_path=env_file)
+elif os.path.exists("./dev.env"):
+    # Fallback to dev.env for local development without Docker
+    load_dotenv(dotenv_path="./dev.env")
+else:
+    # Just load from environment (for Docker/production)
+    load_dotenv()
 
 
 class Settings:
     """Application settings"""
+    
+    # Environment Configuration
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
+    
+    # Security Headers Configuration
+    SECURITY_HEADERS_ENABLED: bool = os.getenv("SECURITY_HEADERS_ENABLED", "true").lower() in {"1", "true", "yes"}
+    HSTS_MAX_AGE: int = int(os.getenv("HSTS_MAX_AGE", "31536000"))  # 1 year in seconds
+    HSTS_INCLUDE_SUBDOMAINS: bool = os.getenv("HSTS_INCLUDE_SUBDOMAINS", "true").lower() in {"1", "true", "yes"}
+    HSTS_PRELOAD: bool = os.getenv("HSTS_PRELOAD", "false").lower() in {"1", "true", "yes"}
+    CSP_POLICY: str = os.getenv("CSP_POLICY", "")
+    
+    # Request ID Configuration
+    REQUEST_ID_HEADER: str = os.getenv("REQUEST_ID_HEADER", "X-Request-ID")
     
     # OpenAI Configuration
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -62,8 +88,20 @@ class Settings:
     RATE_LIMIT_RUN_BURST: int = int(os.getenv("RATE_LIMIT_RUN_BURST", "10"))
     RATE_LIMIT_ASSISTANT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_ASSISTANT_PER_MINUTE", "30"))
     RATE_LIMIT_ASSISTANT_BURST: int = int(os.getenv("RATE_LIMIT_ASSISTANT_BURST", "45"))
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_DEFAULT_PER_MINUTE", "60"))
+    RATE_LIMIT_DEFAULT_BURST: int = int(os.getenv("RATE_LIMIT_DEFAULT_BURST", "100"))
     RATE_LIMIT_PREMIUM_MULTIPLIER: float = float(os.getenv("RATE_LIMIT_PREMIUM_MULTIPLIER", "3.0"))
     CLIENT_IP_HEADER: str = os.getenv("CLIENT_IP_HEADER", "CF-Connecting-IP")
+    
+    # Graceful Shutdown Configuration
+    SHUTDOWN_TIMEOUT: int = int(os.getenv("SHUTDOWN_TIMEOUT", "30"))  # seconds
+    
+    # Uvicorn Production Settings
+    UVICORN_WORKERS: int = int(os.getenv("UVICORN_WORKERS", "4"))  # Number of worker processes
+    UVICORN_TIMEOUT_KEEP_ALIVE: int = int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "5"))  # seconds
+    UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN: int = int(os.getenv("UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN", "30"))  # seconds
+    UVICORN_ACCESS_LOG: bool = os.getenv("UVICORN_ACCESS_LOG", "false").lower() in {"1", "true", "yes"}
+    UVICORN_LOG_LEVEL: str = os.getenv("UVICORN_LOG_LEVEL", "info")
 
     # Prompt Template Path
     PROMPT_TEMPLATE_PATH: Path = Path("./backend/config/PROMPT.md")
@@ -93,8 +131,92 @@ class Settings:
     # This will be set in __init__ after PROJECT_ROOT is available
     JOBS_DIR: Path = None  # type: ignore
     
+    @property
+    def is_production(self) -> bool:
+        """Check if running in production environment"""
+        return self.ENVIRONMENT.lower() == "production"
+    
+    @property
+    def is_development(self) -> bool:
+        """Check if running in development environment"""
+        return self.ENVIRONMENT.lower() == "development"
+    
+    @property
+    def is_staging(self) -> bool:
+        """Check if running in staging environment"""
+        return self.ENVIRONMENT.lower() == "staging"
+    
+    def get_cors_origins(self) -> tuple[list[str], list[str]]:
+        """
+        Get CORS allowed origins and regex patterns based on environment configuration.
+        
+        Supports:
+        - Comma-separated list of origins
+        - Wildcard "*" (development only)
+        - Vercel domains: "vercel" keyword expands to regex patterns for Vercel subdomains
+        
+        Returns:
+            Tuple of (origins list, origin_regex list) for FastAPI CORSMiddleware.
+            Empty lists mean no CORS allowed.
+            ["*"] in origins means all origins allowed (only in development).
+        """
+        # If CORS_ORIGINS is explicitly set, parse it
+        if self.CORS_ORIGINS:
+            # Handle wildcard
+            if self.CORS_ORIGINS.strip() == "*":
+                # Only allow wildcard in development
+                if self.is_development:
+                    return (["*"], [])
+                else:
+                    logger.warning(
+                        "CORS_ORIGINS='*' is not allowed in production. "
+                        "Falling back to empty list (no CORS)."
+                    )
+                    return ([], [])
+            
+            # Parse comma-separated origins
+            origins = []
+            origin_regex = []
+            for origin in self.CORS_ORIGINS.split(","):
+                origin = origin.strip()
+                if not origin:
+                    continue
+                
+                # Handle Vercel keyword expansion
+                if origin.lower() == "vercel":
+                    # Add regex patterns for Vercel subdomains
+                    # Pattern matches: https://anything.vercel.app or https://anything.vercel.dev
+                    origin_regex.extend([
+                        r"https://.*\.vercel\.app",
+                        r"https://.*\.vercel\.dev",
+                    ])
+                    logger.info("Expanded 'vercel' keyword to include Vercel domain regex patterns")
+                else:
+                    origins.append(origin)
+            
+            return (origins, origin_regex)
+        
+        # Default behavior based on environment
+        if self.is_development:
+            # Development: allow all origins for convenience
+            return (["*"], [])
+        else:
+            # Production/staging: no CORS by default (must be explicitly configured)
+            return ([], [])
+    
     def __init__(self):
         """Initialize settings and validate required configurations"""
+        # Validate environment
+        valid_environments = {"development", "production", "staging"}
+        env_lower = self.ENVIRONMENT.lower()
+        if env_lower not in valid_environments:
+            raise ValueError(
+                f"Invalid ENVIRONMENT value: '{self.ENVIRONMENT}'. "
+                f"Must be one of: {', '.join(sorted(valid_environments))}"
+            )
+        # Normalize to lowercase
+        self.ENVIRONMENT = env_lower
+        
         if not self.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
@@ -102,12 +224,13 @@ class Settings:
         # jobs/ directory is at project root level
         self.JOBS_DIR = (self.PROJECT_ROOT / "jobs").resolve()
         
-        # Debug output
-        print(f"DEBUG: Settings initialized")
-        print(f"DEBUG: PROJECT_ROOT: {self.PROJECT_ROOT}")
-        print(f"DEBUG: PROJECT_ROOT exists: {self.PROJECT_ROOT.exists()}")
-        print(f"DEBUG: JOBS_DIR: {self.JOBS_DIR}")
-        print(f"DEBUG: Current working directory: {Path.cwd()}")
+        # Debug output (only in development)
+        if self.is_development:
+            logger.debug("Settings initialized")
+            logger.debug(f"PROJECT_ROOT: {self.PROJECT_ROOT}")
+            logger.debug(f"PROJECT_ROOT exists: {self.PROJECT_ROOT.exists()}")
+            logger.debug(f"JOBS_DIR: {self.JOBS_DIR}")
+            logger.debug(f"Current working directory: {Path.cwd()}")
         
         if not self.QUEUE_URL:
             raise ValueError("QUEUE_URL environment variable is required for job processing")

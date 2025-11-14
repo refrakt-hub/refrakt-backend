@@ -1,6 +1,7 @@
 """Job management service"""
 
 import asyncio
+import logging
 import os
 import shutil
 import uuid
@@ -16,6 +17,8 @@ from services.r2_service import R2Service
 from services.websocket_service import WebSocketService
 from services.job_repository import get_job_repository, JobRepository
 from services.metrics import record_job_status_transition
+
+logger = logging.getLogger(__name__)
 
 DATASET_TTL_SECONDS = 3600
 DATASET_ROOT = Path("/tmp/datasets")
@@ -170,7 +173,7 @@ class JobService:
                             class_names.add(parts[idx + 1])
                             break
         except Exception as analysis_error:
-            print(f"DEBUG: Failed to analyze dataset zip {dataset_path}: {analysis_error}")
+            logger.debug(f"Failed to analyze dataset zip {dataset_path}: {analysis_error}", exc_info=True)
 
         ordered_class_names = sorted(class_names)
         return {
@@ -238,15 +241,15 @@ class JobService:
         """
         try:
             if not job_dir.exists():
-                print(f"Job directory already cleaned up: {job_dir}")
+                logger.debug(f"Job directory already cleaned up: {job_dir}")
                 return True
             
             # Delete the entire job directory
             shutil.rmtree(job_dir)
-            print(f"Cleaned up local files for job {job_id}")
+            logger.info(f"Cleaned up local files for job {job_id}")
             return True
         except Exception as e:
-            print(f"Error cleaning up job directory {job_dir}: {str(e)}")
+            logger.error(f"Error cleaning up job directory {job_dir}: {str(e)}", exc_info=True)
             return False
     
     async def run_job(self, job_id: str):
@@ -295,7 +298,7 @@ class JobService:
             except Exception as dataset_error:
                 self.update_job_status(job_id, "error", error=str(dataset_error))
                 await self.websocket_service.broadcast_log(job_id, f"[Dataset] {dataset_error}")
-                print(f"DEBUG: Job {job_id} dataset error: {dataset_error}")
+                logger.debug(f"Job {job_id} dataset error: {dataset_error}", exc_info=True)
                 return
 
             # Find refrakt command - try to locate it in PATH or use python -m
@@ -319,12 +322,12 @@ class JobService:
                     "--log-dir", log_dir_relative
                 ]
             
-            print(f"DEBUG: Running command: {' '.join(cmd)}")
-            print(f"DEBUG: Project root: {project_root}")
-            print(f"DEBUG: Output dir (absolute): {output_dir}")
-            print(f"DEBUG: Log dir (relative): {log_dir_relative}")
-            print(f"DEBUG: Config path: {config_path}")
-            print(f"DEBUG: Config exists: {os.path.exists(config_path)}")
+            logger.debug(f"Running command: {' '.join(cmd)}")
+            logger.debug(f"Project root: {project_root}")
+            logger.debug(f"Output dir (absolute): {output_dir}")
+            logger.debug(f"Log dir (relative): {log_dir_relative}")
+            logger.debug(f"Config path: {config_path}")
+            logger.debug(f"Config exists: {os.path.exists(config_path)}")
             
             # Prepare environment variables for tqdm and backend detection
             env = os.environ.copy()
@@ -348,7 +351,7 @@ class JobService:
                 )
             except FileNotFoundError as e:
                 error_msg = f"Failed to start subprocess: {e}. Command: {' '.join(cmd)}"
-                print(f"DEBUG: {error_msg}")
+                logger.debug(error_msg, exc_info=True)
                 raise FileNotFoundError(error_msg) from e
             
             # Stream output in real-time using chunked reading
@@ -365,7 +368,8 @@ class JobService:
                         # Broadcast to WebSocket clients
                         await self.websocket_service.broadcast_log(job_id, line_text)
                         
-                        print(f"[JOB {job_id}] {line_text}")
+                        # Log job output at debug level (already stored in job logs and broadcast via WebSocket)
+                        logger.debug(f"[JOB {job_id}] {line_text}")
             
             # Wait for process to complete
             await process.wait()
@@ -405,7 +409,7 @@ class JobService:
                                     "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
                                 })
                             except Exception as e:
-                                print(f"Error collecting artifact metadata for {file_path}: {str(e)}")
+                                logger.warning(f"Error collecting artifact metadata for {file_path}: {str(e)}", exc_info=True)
                 
                 self.repository.update_job(job_id, artifact_metadata=artifact_metadata)
                 
@@ -441,15 +445,15 @@ class JobService:
                     job_id,
                     "Job completed and artifacts uploaded!"
                 )
-                print(f"DEBUG: Job {job_id} completed successfully")
+                logger.info(f"Job {job_id} completed successfully")
             else:
                 error_msg = "\n".join(output_lines[-10:]) if output_lines else "Unknown error"
                 self.update_job_status(job_id, "error", error=error_msg)
-                print(f"DEBUG: Job {job_id} failed with return code {process.returncode}")
+                logger.error(f"Job {job_id} failed with return code {process.returncode}")
             
         except Exception as e:
             self.update_job_status(job_id, "error", error=str(e))
-            print(f"DEBUG: Job {job_id} failed with exception: {str(e)}")
+            logger.error(f"Job {job_id} failed with exception: {str(e)}", exc_info=True)
     
     async def _read_stream_chunks(self, stream, chunk_size: int = 8192):
         """
@@ -493,7 +497,7 @@ class JobService:
                             if line_text:
                                 yield line_text
                         except Exception as e:
-                            print(f"DEBUG: Decode error: {e}")
+                            logger.debug(f"Decode error: {e}", exc_info=True)
                         processed = True
                         continue
                     if b'\r' in buffer:
@@ -523,6 +527,6 @@ class JobService:
                     break
                         
             except Exception as e:
-                print(f"DEBUG: Stream read error: {e}")
+                logger.debug(f"Stream read error: {e}", exc_info=True)
                 break
 

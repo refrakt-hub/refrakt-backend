@@ -1,5 +1,6 @@
 """Cloudflare R2 storage service"""
 
+import logging
 import mimetypes
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,8 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class R2Service:
@@ -27,10 +30,10 @@ class R2Service:
                 config=Config(signature_version='s3v4'),
                 region_name='auto'
             )
-            print("Cloudflare R2 configured successfully")
+            logger.info("Cloudflare R2 configured successfully")
         else:
             self.s3_client = None
-            print("R2 credentials not found - artifact upload will be disabled")
+            logger.warning("R2 credentials not found - artifact upload will be disabled")
     
     def is_configured(self) -> bool:
         """Check if R2 is configured"""
@@ -83,14 +86,14 @@ class R2Service:
             # Generate public URL
             public_url = f"{self.settings.R2_PUBLIC_URL}/{r2_key}"
             
-            print(f"Uploaded to R2: {r2_key}")
+            logger.debug(f"Uploaded to R2: {r2_key}")
             return True, public_url
             
         except ClientError as e:
-            print(f"R2 upload error: {str(e)}")
+            logger.error(f"R2 upload error: {str(e)}", exc_info=True)
             return False, None
         except Exception as e:
-            print(f"Unexpected upload error: {str(e)}")
+            logger.error(f"Unexpected upload error: {str(e)}", exc_info=True)
             return False, None
     
     def generate_presigned_url(
@@ -125,7 +128,7 @@ class R2Service:
             )
             return url
         except ClientError as e:
-            print(f"Error generating presigned URL: {str(e)}")
+            logger.error(f"Error generating presigned URL: {str(e)}", exc_info=True)
             return None
     
     async def upload_job_artifacts(self, job_id: str, job_dir: Path) -> dict:
@@ -140,11 +143,11 @@ class R2Service:
             Dictionary with upload statistics
         """
         if not self.s3_client:
-            print(f"Skipping R2 upload for job {job_id} - R2 not configured")
+            logger.info(f"Skipping R2 upload for job {job_id} - R2 not configured")
             return {"uploaded": 0, "failed": 0, "total": 0}
         
         if not job_dir.exists():
-            print(f"Job directory not found: {job_dir}")
+            logger.warning(f"Job directory not found: {job_dir}")
             return {"uploaded": 0, "failed": 0, "total": 0}
         
         uploaded_count = 0
@@ -161,7 +164,7 @@ class R2Service:
                 else:
                     failed_count += 1
         
-        print(f"R2 Upload Summary for {job_id}: {uploaded_count} uploaded, {failed_count} failed")
+        logger.info(f"R2 Upload Summary for {job_id}: {uploaded_count} uploaded, {failed_count} failed")
         
         return {
             "uploaded": uploaded_count,

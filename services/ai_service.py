@@ -1,5 +1,6 @@
 """AI service for generating YAML configs using OpenAI"""
 
+import logging
 import yaml
 from typing import Any, Dict, Optional
 from openai import OpenAI
@@ -11,6 +12,8 @@ from utils.config_validator import (
     UnsupportedModelError,
     FutureModelError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AIService:
@@ -107,8 +110,8 @@ class AIService:
                     raise ValueError(str(validation_error)) from validation_error
 
                 if model_name:
-                    print(
-                        "DEBUG: Validation failed for generated config; attempting fallback template "
+                    logger.debug(
+                        f"Validation failed for generated config; attempting fallback template "
                         f"(model={model_name}). Reason: {validation_error}"
                     )
                     try:
@@ -124,7 +127,7 @@ class AIService:
                     raise ValueError(str(validation_error)) from validation_error
 
             for warning in result.warnings:
-                print(f"DEBUG: Config validation warning: {warning.message}")
+                logger.warning(f"Config validation warning: {warning.message}")
 
             return result.config
             

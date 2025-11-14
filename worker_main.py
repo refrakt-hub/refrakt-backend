@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from saq.worker import Worker
 
 from services.job_worker_settings import build_settings
+from utils.logging_config import setup_logging, get_logger
+
+# Setup logging before any other imports that might log
+environment = os.getenv("ENVIRONMENT", "development")
+log_level = os.getenv("LOG_LEVEL", "INFO")
+setup_logging(environment, log_level)
+logger = get_logger(__name__)
 
 
 async def _run_worker():
@@ -17,8 +25,9 @@ async def _run_worker():
     worker = Worker(queue, functions, **settings)
     try:
         await queue.connect()
-        logging.getLogger("refrakt.worker").info(
-            "Queue worker started (id=%s, concurrency=%s)", worker.id, worker.concurrency
+        logger.info(
+            "Queue worker started",
+            extra={"worker_id": worker.id, "concurrency": worker.concurrency}
         )
         await worker.start()
         await worker.wait()
