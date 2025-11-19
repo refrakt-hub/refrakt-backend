@@ -51,6 +51,27 @@ QUEUE_OLDEST_WAIT_SECONDS = Gauge(
     "Age in seconds of the oldest pending job",
 )
 
+# GPU scheduling metrics
+GPU_ACTIVE_JOBS = Gauge(
+    "refrakt_gpu_active_jobs",
+    "Number of jobs currently using GPU",
+)
+
+GPU_MEMORY_USED_MB = Gauge(
+    "refrakt_gpu_memory_used_mb",
+    "GPU memory currently in use (MB)",
+)
+
+GPU_MEMORY_AVAILABLE_MB = Gauge(
+    "refrakt_gpu_memory_available_mb",
+    "GPU memory currently available (MB)",
+)
+
+GPU_UTILIZATION_PERCENT = Gauge(
+    "refrakt_gpu_utilization_percent",
+    "GPU memory utilization percentage",
+)
+
 
 def record_job_enqueued(source: str) -> None:
     """Increment counter when a job is enqueued."""

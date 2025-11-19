@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from config import get_settings
 from services.ai_service import AIService
@@ -165,29 +165,128 @@ class AssistantService:
 
         self._vector_store.load_or_initialize()
         if reindex or not self._vector_store.is_ready():
-            self.rebuild_static_index()
+            success, _ = self.rebuild_static_index()
+            if not success:
+                self._logger.warning("Failed to rebuild static index during initialization")
 
-    def rebuild_static_index(self) -> bool:
+    def rebuild_static_index(self) -> Tuple[bool, Optional[dict]]:
+        """
+        Rebuild the static knowledge index.
+        
+        Returns:
+            Tuple of (success: bool, details: dict | None)
+            On success, details contains statistics about the rebuild.
+            On failure, details contains error information.
+        """
+        import time
+        start_time = time.time()
+        
         if not (self._vector_store and self._embedding_service and self._doc_service):
-            return False
-        try:
-            chunks = self._doc_service.load_static_corpus()
-            payload = [
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "text": chunk.text,
-                    "metadata": chunk.metadata,
+            return False, {
+                "error": "Missing required services",
+                "error_type": "configuration",
+                "details": {
+                    "vector_store": self._vector_store is not None,
+                    "embedding_service": self._embedding_service is not None,
+                    "doc_service": self._doc_service is not None,
                 }
-                for chunk in chunks
-            ]
-            self._vector_store.rebuild(payload, self._embedding_service.embed)
-            self._logger.info("Assistant static knowledge index rebuilt (%s chunks).", len(payload))
+            }
+        
+        try:
+            # Step 1: Load documents
+            try:
+                chunks = self._doc_service.load_static_corpus()
+            except Exception as exc:
+                self._logger.exception("Failed to load static corpus: %s", exc)
+                return False, {
+                    "error": "Failed to load documents",
+                    "error_type": "document_loading",
+                    "error_message": str(exc),
+                }
+            
+            if not chunks:
+                return False, {
+                    "error": "No documents found to index",
+                    "error_type": "empty_corpus",
+                }
+            
+            # Step 2: Prepare payload
+            try:
+                payload = [
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "text": chunk.text,
+                        "metadata": chunk.metadata,
+                    }
+                    for chunk in chunks
+                ]
+            except Exception as exc:
+                self._logger.exception("Failed to prepare payload: %s", exc)
+                return False, {
+                    "error": "Failed to prepare document payload",
+                    "error_type": "payload_preparation",
+                    "error_message": str(exc),
+                    "chunks_loaded": len(chunks),
+                }
+            
+            # Step 3: Rebuild vector store (this generates embeddings)
+            try:
+                embedding_start = time.time()
+                self._vector_store.rebuild(payload, self._embedding_service.embed)
+                embedding_time = time.time() - embedding_start
+            except Exception as exc:
+                self._logger.exception("Failed to rebuild vector store: %s", exc)
+                return False, {
+                    "error": "Failed to rebuild vector store",
+                    "error_type": "vector_store_rebuild",
+                    "error_message": str(exc),
+                    "chunks_loaded": len(chunks),
+                    "payload_prepared": len(payload),
+                }
+            
+            # Step 4: Collect statistics
+            total_time = time.time() - start_time
+            
+            # Count chunks by source
+            sources = {}
+            for chunk in chunks:
+                source = chunk.metadata.get("source", "unknown")
+                sources[source] = sources.get(source, 0) + 1
+            
+            # Get embedding cache statistics
+            embedding_cache_size = 0
+            if hasattr(self._embedding_service, "_cache"):
+                embedding_cache_size = len(self._embedding_service._cache)
+            
+            details = {
+                "status": "success",
+                "chunks_indexed": len(payload),
+                "sources": sources,
+                "source_count": len(sources),
+                "time_taken_seconds": round(total_time, 2),
+                "embedding_time_seconds": round(embedding_time, 2),
+                "embedding_model": self._embedding_service._model if self._embedding_service else None,
+                "embedding_cache_size": embedding_cache_size,
+                "vector_store_path": str(self._vector_store._storage_path) if self._vector_store else None,
+            }
+            
+            self._logger.info(
+                "Assistant static knowledge index rebuilt: %s chunks from %s sources in %.2fs",
+                len(payload),
+                len(sources),
+                total_time
+            )
             self._retrieval_enabled = True
-            return True
+            return True, details
+            
         except Exception as exc:
             self._logger.exception("Failed to rebuild assistant index: %s", exc)
             self._retrieval_enabled = False
-            return False
+            return False, {
+                "error": "Unexpected error during reindexing",
+                "error_type": "unexpected_error",
+                "error_message": str(exc),
+            }
 
     def _collect_context_sections(self, message: str) -> List[str]:
         sections: List[str] = []

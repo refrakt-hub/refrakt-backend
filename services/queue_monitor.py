@@ -8,7 +8,13 @@ from typing import Optional
 
 from config import Settings, get_settings
 from services.job_repository import get_job_repository, JobRepository
-from services.metrics import update_queue_snapshot
+from services.metrics import (
+    update_queue_snapshot,
+    GPU_ACTIVE_JOBS,
+    GPU_MEMORY_USED_MB,
+    GPU_MEMORY_AVAILABLE_MB,
+    GPU_UTILIZATION_PERCENT,
+)
 
 PENDING_STATUSES = {"pending", "generating", "queued"}
 RUNNING_STATUSES = {"running", "uploading"}
@@ -85,6 +91,20 @@ class QueueMonitor:
             running_jobs=running_jobs,
             oldest_pending_seconds=oldest_pending_seconds,
         )
+        
+        # Update GPU metrics if scheduler is enabled
+        if self._settings.GPU_SCHEDULER_ENABLED:
+            try:
+                from services.gpu_scheduler import get_gpu_scheduler
+                scheduler = get_gpu_scheduler()
+                usage = scheduler.get_current_usage()
+                GPU_ACTIVE_JOBS.set(usage["active_jobs"])
+                GPU_MEMORY_USED_MB.set(usage["used_memory_mb"])
+                GPU_MEMORY_AVAILABLE_MB.set(usage["available_memory_mb"])
+                GPU_UTILIZATION_PERCENT.set(usage["utilization_percent"])
+            except Exception:
+                # GPU metrics are optional, don't fail queue monitoring if they fail
+                pass
 
 
 def _age_seconds(iso_str: str, now: datetime) -> Optional[float]:

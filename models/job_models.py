@@ -58,4 +58,8 @@ class RunResponse(BaseModel):
     message: str
     job: Optional[JobResponse] = None
     conversation_id: Optional[str] = None
+    # Assistant metadata (always present when assistant is enabled)
+    intent: Optional[str] = None  # "training_request", "general", "unknown"
+    confidence: Optional[float] = None  # 0.0-1.0 confidence score
+    training_prompt: Optional[str] = None  # Refined prompt if training intent detected
 

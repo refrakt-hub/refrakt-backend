@@ -45,6 +45,7 @@ from services.rate_limiter import (
 from services.admission_control import ensure_queue_capacity
 from services.job_repository import get_job_repository
 from utils import classify_artifact, load_prompt_template
+from utils.config_validator import ConfigValidator
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,23 @@ async def test_openai():
 async def test_r2():
     """Test R2 connection and permissions"""
     return r2_service.test_connection()
+
+
+@router.get("/gpu/usage", dependencies=[])  # Exclude from rate limiting (monitoring endpoint)
+async def get_gpu_usage():
+    """Get current GPU usage statistics."""
+    from config import get_settings
+    settings = get_settings()
+    
+    if not settings.GPU_SCHEDULER_ENABLED:
+        return {
+            "enabled": False,
+            "message": "GPU scheduler is disabled"
+        }
+    
+    from services.gpu_scheduler import get_gpu_scheduler
+    scheduler = get_gpu_scheduler()
+    return scheduler.get_current_usage()
 
 
 @router.get("/health", dependencies=[])  # Exclude from rate limiting (health check)
@@ -261,10 +279,14 @@ async def _start_training_job(
 
         job_dir = settings.JOBS_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        config_path = job_dir / "config.generated.yaml"
+        # Persist the generated configuration as config.yaml inside the job directory.
+        config_path = job_dir / "config.yaml"
         with config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, sort_keys=False)
 
+        # Store metadata (including the on-disk path) for observability; the worker
+        # will reconstruct the path from JOBS_DIR + job_id to avoid host/container
+        # path mismatches.
         job_service.record_job_configuration(job_id, config, str(config_path))
 
         queue_job_id = await enqueue_training_job(job_id, source=source)
@@ -317,6 +339,9 @@ async def run_job(
     assistant_result = None
     effective_prompt = request_prompt
 
+    # By default, assume we're *not* in training mode until proven otherwise
+    resolved_training_intent = False
+
     if settings.ASSISTANT_ENABLED:
         assistant_result = assistant_service.process_message(
             message=request_prompt,
@@ -325,16 +350,51 @@ async def run_job(
         )
         conversation_id = assistant_result.conversation_id
 
-        if assistant_result.intent != "training_request":
-            return RunResponse(
-                mode="assistant",
-                message=assistant_result.reply,
-                job=None,
-                conversation_id=conversation_id,
+        # Primary signal from assistant
+        if assistant_result.intent == "training_request":
+            resolved_training_intent = True
+            if assistant_result.training_prompt:
+                effective_prompt = assistant_result.training_prompt
+        else:
+            # Backend heuristic: treat clearly-training prompts that mention a supported model
+            # as training requests, even if the assistant intent is not "training_request".
+            validator = ConfigValidator()
+            supported_ref = validator.find_supported_model_reference(request_prompt)
+            lowered = request_prompt.lower()
+            has_training_verb = any(
+                phrase in lowered
+                for phrase in (
+                    "train ",
+                    "train\n",
+                    "fine-tune",
+                    "fine tune",
+                    "run training",
+                    "start training",
+                    "fit a model",
+                    "fit the model",
+                )
             )
 
-        if assistant_result.training_prompt:
-            effective_prompt = assistant_result.training_prompt
+            if supported_ref and has_training_verb:
+                logger.info(
+                    "Overriding assistant intent to 'training_request' based on backend "
+                    "heuristic (alias='%s', canonical='%s')",
+                    supported_ref[0],
+                    supported_ref[1],
+                )
+                resolved_training_intent = True
+
+    if not resolved_training_intent:
+        # Stay in assistant mode – no training job will be started
+        return RunResponse(
+            mode="assistant",
+            message=assistant_result.reply if assistant_result else "I am still gathering details on that.",
+            job=None,
+            conversation_id=conversation_id,
+            intent=assistant_result.intent if assistant_result else None,
+            confidence=assistant_result.confidence if assistant_result else None,
+            training_prompt=assistant_result.training_prompt if assistant_result else None,
+        )
 
     job_payload = await _start_training_job(effective_prompt, request_user_id, dataset_upload)
 
@@ -343,14 +403,29 @@ async def run_job(
         message=assistant_result.reply if assistant_result else "Job queued successfully",
         job=job_payload,
         conversation_id=conversation_id,
+        intent=assistant_result.intent if assistant_result else "training_request",
+        confidence=assistant_result.confidence if assistant_result else None,
+        training_prompt=assistant_result.training_prompt if assistant_result else effective_prompt,
     )
 
 
 @router.post(
     "/assistant",
     dependencies=_ASSISTANT_DEPENDENCIES,
+    deprecated=True,
 )
 async def assistant_endpoint(payload: dict):
+    """
+    DEPRECATED: Use /run endpoint instead.
+    
+    This endpoint is deprecated and will be removed in a future version.
+    The /run endpoint provides the same functionality with additional features:
+    - Supports file uploads (dataset attachments)
+    - Unified response format
+    - Better error handling
+    
+    Migration: Replace POST /assistant with POST /run using form data or JSON.
+    """
     message = payload.get("message")
     user_id = payload.get("user_id") or "anonymous"
     conversation_id = payload.get("conversation_id")
@@ -385,14 +460,51 @@ async def assistant_endpoint(payload: dict):
 
 @router.post("/assistant/reindex")
 async def assistant_reindex():
+    """
+    Rebuild the assistant's RAG (Retrieval-Augmented Generation) knowledge index.
+    
+    This endpoint rebuilds the vector store used for document retrieval in assistant conversations.
+    It indexes:
+    - Prompt template documentation
+    - Configuration examples (from configs/ directory)
+    - Supported models summary
+    
+    Returns detailed statistics about the reindexing operation including:
+    - Number of chunks indexed
+    - Sources indexed
+    - Time taken
+    - Embedding statistics
+    """
     if not settings.ASSISTANT_ENABLED or not settings.ASSISTANT_RETRIEVAL_ENABLED:
-        raise HTTPException(status_code=503, detail="Assistant retrieval disabled")
+        raise HTTPException(
+            status_code=503,
+            detail="Assistant retrieval disabled. Enable ASSISTANT_ENABLED and ASSISTANT_RETRIEVAL_ENABLED to use this endpoint."
+        )
 
-    success = assistant_service.rebuild_static_index()
+    success, details = assistant_service.rebuild_static_index()
+    
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to rebuild assistant index")
+        error_type = details.get("error_type", "unknown") if details else "unknown"
+        error_message = details.get("error_message", "Unknown error") if details else "Unknown error"
+        status_code = 500
+        
+        # Provide more specific error codes
+        if error_type == "configuration":
+            status_code = 503  # Service unavailable
+        elif error_type == "empty_corpus":
+            status_code = 400  # Bad request (no documents to index)
+        
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": details.get("error", "Failed to rebuild assistant index") if details else "Failed to rebuild assistant index",
+                "error_type": error_type,
+                "error_message": error_message,
+                "details": details,
+            }
+        )
 
-    return {"status": "ok"}
+    return details
 
 
 @router.websocket("/ws/job/{job_id}/logs")  # WebSocket endpoints don't use rate limiting dependencies

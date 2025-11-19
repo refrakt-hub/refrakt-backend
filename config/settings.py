@@ -76,6 +76,12 @@ class Settings:
     QUEUE_MAX_PENDING: int = int(os.getenv("QUEUE_MAX_PENDING", "40"))
     QUEUE_MAX_AGE_SECONDS: int = int(os.getenv("QUEUE_MAX_AGE_SECONDS", "600"))
 
+    # GPU Scheduling Configuration
+    GPU_SCHEDULER_ENABLED: bool = os.getenv("GPU_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes"}
+    GPU_TOTAL_MEMORY_MB: int = int(os.getenv("GPU_TOTAL_MEMORY_MB", "40960"))  # A100 40GB default
+    GPU_RESERVED_MEMORY_MB: int = int(os.getenv("GPU_RESERVED_MEMORY_MB", "2048"))  # 2GB reserved for system/CUDA
+    GPU_MAX_CONCURRENT_JOBS: int = int(os.getenv("GPU_MAX_CONCURRENT_JOBS", "3"))  # Max concurrent training jobs
+
     # Observability
     PROMETHEUS_ENABLED: bool = os.getenv("PROMETHEUS_ENABLED", "true").lower() in {"1", "true", "yes"}
     PROMETHEUS_METRICS_ROUTE: str = os.getenv("PROMETHEUS_METRICS_ROUTE", "/metrics")
@@ -220,9 +226,16 @@ class Settings:
         if not self.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
-        # Resolve JOBS_DIR relative to project root
-        # jobs/ directory is at project root level
-        self.JOBS_DIR = (self.PROJECT_ROOT / "jobs").resolve()
+        # Resolve JOBS_DIR
+        # Prefer explicit JOBS_DIR environment variable (e.g. "./jobs"), which will
+        # be resolved relative to the current working directory in each environment
+        # (host vs container). Fallback to PROJECT_ROOT / "jobs" if not set.
+        env_jobs_dir = os.getenv("JOBS_DIR")
+        if env_jobs_dir:
+            self.JOBS_DIR = Path(env_jobs_dir).resolve()
+        else:
+            # jobs/ directory is at project root level
+            self.JOBS_DIR = (self.PROJECT_ROOT / "jobs").resolve()
         
         # Debug output (only in development)
         if self.is_development:

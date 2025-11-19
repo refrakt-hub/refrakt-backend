@@ -1,8 +1,7 @@
-# Dockerfile for Refrakt Backend (Development/Full Repo Context)
-# This Dockerfile builds from the project root (requires full repo)
-# For production backend-only deployment, use Dockerfile.prod instead
-# Usage (dev): docker build -f backend/Dockerfile -t refrakt-backend:dev .
-# Usage (prod): docker build -f backend/Dockerfile.prod -t refrakt-backend:prod backend/
+# Production Dockerfile for Refrakt Backend
+# This Dockerfile installs packages from PyPI (refrakt_core, refrakt_cli)
+# Backend requires refrakt_core (for model validation) and refrakt_cli (for job execution)
+# Usage: docker build -f backend/Dockerfile.prod -t refrakt:latest .
 
 FROM python:3.11-slim AS builder
 
@@ -17,42 +16,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir uv
 
-# Copy root workspace files (for dev/full repo context)
-COPY pyproject.toml /app/
-COPY uv.lock /app/
+# Copy backend requirements and pyproject.toml (needed for editable install)
 COPY backend/requirements.txt /app/backend/requirements.txt
 COPY backend/pyproject.toml /app/backend/pyproject.toml
 
+# Install backend dependencies and PyPI packages
+# refrakt_core and refrakt_cli are installed from PyPI (not editable)
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system --no-cache -r backend/requirements.txt
+    uv pip install --system --no-cache \
+        -r backend/requirements.txt \
+        refrakt_core \
+        refrakt_cli
 
+# Copy backend source code
 COPY backend/ /app/backend/
 
-# Copy workspace packages (core, CLI, viz, xai) so they can be installed into the image.
-COPY src/ /app/src/
-
-# Install PyTorch with CUDA 11.8 support (supports compute capability 6.1+)
-# This is needed for older GPUs like GeForce MX250 (compute capability 6.1)
-# PyTorch 2.0.1 is the last version with CUDA 11.8 support
-# Pin numpy to <2.0 because PyTorch 2.0.x is not compatible with numpy 2.x
+# Install backend as package
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system --no-cache \
-        "numpy<2.0" && \
-    uv pip install --system --no-cache \
-        --index-url https://download.pytorch.org/whl/cu118 \
-        "torch>=2.0.0,<2.1.0" "torchvision>=0.15.0,<0.16.0" "torchaudio>=2.0.0,<2.1.0"
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pip \
-    cd /app && \
-    uv pip install --system --no-cache -e . && \
-    uv pip install --system --no-cache \
-        -e ./src/refrakt_core \
-        -e ./src/refrakt_cli \
-        -e "./src/refrakt_viz[interactive]" \
-        -e ./src/refrakt_xai
+    cd /app/backend && uv pip install --system --no-cache -e .
 
 FROM python:3.11-slim AS runtime
 
@@ -64,14 +47,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy installed packages and binaries from builder
+# This includes refrakt_core and refrakt_cli from PyPI, plus the refrakt command
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
+# Copy backend source code
 COPY backend/ /app/backend/
-COPY pyproject.toml /app/
-# Copy workspace packages (needed for editable installs)
-COPY src/ /app/src/
 
+# Create non-root user
 RUN groupadd -r -g 1000 refrakt && \
     useradd -r -u 1000 -g refrakt -d /app -s /bin/bash refrakt && \
     chown -R refrakt:refrakt /app
@@ -92,5 +76,6 @@ EXPOSE 8000
 # Use uvicorn CLI for production with worker support
 # For single worker, use: python -m backend.main
 # For multiple workers, use: uvicorn backend.main:app --workers $UVICORN_WORKERS
+# Structure maintained: /app/backend/ (same as dev Dockerfile)
 CMD ["sh", "-c", "if [ \"$UVICORN_WORKERS\" = \"1\" ]; then python -m backend.main; else uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${UVICORN_WORKERS:-4} --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE:-5} --timeout-graceful-shutdown ${UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN:-30} --log-level ${UVICORN_LOG_LEVEL:-info} --no-access-log; fi"]
 

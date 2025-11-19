@@ -379,6 +379,18 @@ class ConfigValidator:
                 return alias, canonical
         return None
 
+    def find_supported_model_reference(self, text: str) -> Optional[Tuple[str, str]]:
+        """Find the first reference in free-text to a supported model (by alias or name).
+
+        Returns:
+            (alias, canonical_name) if a supported model is mentioned, otherwise None.
+        """
+        lowered = text.lower()
+        for alias, canonical in self._model_alias_pairs():
+            if alias in lowered and canonical in self._SUPPORTED_MODELS:
+                return alias, canonical
+        return None
+
     def _model_alias_pairs(self) -> list[Tuple[str, str]]:
         if self._alias_cache is not None:
             return self._alias_cache

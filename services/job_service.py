@@ -265,12 +265,9 @@ class JobService:
                 raise ValueError(f"Job {job_id} not found")
 
             config = job_record.get("config")
-            config_path = job_record.get("config_path")
 
             if not isinstance(config, dict):
                 raise ValueError(f"Job {job_id} missing configuration payload")
-            if not isinstance(config_path, str):
-                raise ValueError(f"Job {job_id} missing configuration path")
 
             # Create output directory
             output_dir = self.settings.JOBS_DIR / job_id
@@ -284,9 +281,14 @@ class JobService:
             # Project root is where refrakt CLI runs from
             project_root = self.settings.PROJECT_ROOT
             log_dir_relative = os.path.relpath(output_dir, project_root)
+
+            # Resolve configuration path inside the container/host environment.
+            # To avoid host-vs-container mismatches, always derive the path from
+            # JOBS_DIR and job_id and use a fixed filename (config.yaml).
+            config_path = output_dir / "config.yaml"
             
             # Verify config file exists
-            if not os.path.exists(config_path):
+            if not config_path.exists():
                 raise FileNotFoundError(f"Config file not found: {config_path}")
             
             # Verify project root exists
@@ -310,7 +312,7 @@ class JobService:
                     cmd = [
                         python_cmd,
                         "-m", "refrakt_cli",
-                        "--config", config_path,
+                        "--config", str(config_path),
                         "--log-dir", log_dir_relative
                     ]
                 else:
@@ -318,7 +320,7 @@ class JobService:
             else:
                 cmd = [
                     refrakt_cmd,
-                    "--config", config_path,
+                    "--config", str(config_path),
                     "--log-dir", log_dir_relative
                 ]
             
@@ -327,7 +329,7 @@ class JobService:
             logger.debug(f"Output dir (absolute): {output_dir}")
             logger.debug(f"Log dir (relative): {log_dir_relative}")
             logger.debug(f"Config path: {config_path}")
-            logger.debug(f"Config exists: {os.path.exists(config_path)}")
+            logger.debug(f"Config exists: {config_path.exists()}")
             
             # Prepare environment variables for tqdm and backend detection
             env = os.environ.copy()

@@ -27,12 +27,15 @@ async def _run_worker():
         await queue.connect()
         logger.info(
             "Queue worker started",
-            extra={"worker_id": worker.id, "concurrency": worker.concurrency}
+            extra={"worker_id": worker.id, "concurrency": worker.concurrency},
         )
+        # Worker.start() runs the polling loop and only returns on shutdown.
         await worker.start()
-        await worker.wait()
     finally:
-        await queue.disconnect()
+        try:
+            await queue.disconnect()
+        except Exception as exc:  # Best-effort cleanup; log and ignore on shutdown
+            logger.warning("Error disconnecting queue during worker shutdown: %s", exc)
 
 
 def main():
