@@ -110,7 +110,7 @@ logger.info(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins if cors_origins else None,
+    allow_origins=cors_origins,  # Empty list is valid (no CORS), don't pass None
     allow_origin_regex="|".join(cors_origin_regex) if cors_origin_regex else None,
     allow_credentials=True,
     allow_methods=["*"],
